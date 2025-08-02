@@ -1,72 +1,158 @@
-import telebot from telebot import types import requests import random from datetime import datetime, timedelta
+from flask import Flask
+import telebot
+from telebot import types
+from telebot.types import ChatPermissions
+import os
+import time
+import requests
 
-🔐 Токен бота
+app = Flask(__name__)
 
-TOKEN = 'YOUR_BOT_TOKEN_HERE' bot = telebot.TeleBot(TOKEN)
+@app.route('/')
+def home():
+    return 'MultiBotX is running!'
 
-🚫 Хранение предупреждений и мутов
+# Токен Telegram-бота
+TOKEN = os.environ.get("BOT_TOKEN")
+bot = telebot.TeleBot(TOKEN)
 
-warns = {} mutes = {}
+# ✅ Заменить на твой ключ SaveTube
+SAVETUBE_API_KEY = "382735d147msh533d7dec3c4d3abp12b125jsnfa97a86f84db"
 
-🎉 Развлекательные данные
+# Команда /start
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.send_message(message.chat.id, f"Привет, {message.from_user.first_name}! Я — MultiBotX.\nНапиши /help для списка команд.")
 
-jokes = [ "Почему программисты путают Хэллоуин и Рождество? Потому что OCT 31 = DEC 25!", "Что говорит один бит другому? - До встречи на шине!", "Баг не баг, а фича — штука вечная!" ]
+# Команда /help
+@bot.message_handler(commands=['help'])
+def help(message):
+    help_text = (
+        "📋 Доступные команды:\n"
+        "/warn — Предупреждение\n"
+        "/mute — Мут на 1 час\n"
+        "/unmute — Размут\n"
+        "/ban — Бан\n"
+        "/unban — Разбан\n"
+        "/yt <ссылка> — Скачать видео с YouTube\n"
+        "/tt <ссылка> — Скачать видео из TikTok\n"
+    )
+    bot.send_message(message.chat.id, help_text)
 
-facts = [ "Пчёлы могут узнавать лица людей.", "Осьминоги имеют три сердца.", "Самая тяжёлая планета — Юпитер." ]
+# /warn
+@bot.message_handler(commands=['warn'])
+def warn(message):
+    if message.reply_to_message:
+        user = message.reply_to_message.from_user
+        bot.send_message(message.chat.id, f"⚠️ {user.first_name} получил предупреждение!")
+    else:
+        bot.reply_to(message, "Команда должна быть ответом на сообщение.")
 
-📦 API-ключи
+# /mute
+@bot.message_handler(commands=['mute'])
+def mute(message):
+    if message.reply_to_message:
+        try:
+            until_time = time.time() + 60 * 60
+            bot.restrict_chat_member(
+                chat_id=message.chat.id,
+                user_id=message.reply_to_message.from_user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_time
+            )
+            bot.send_message(message.chat.id, "🔇 Пользователь замучен на 1 час.")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"Ошибка: {e}")
+    else:
+        bot.reply_to(message, "Ответь на сообщение пользователя.")
 
-SAVETUBE_API_KEY = '382735d147msh533d7dec3c4d3abp12b125jsnfa97a86f84db'
+# /unmute
+@bot.message_handler(commands=['unmute'])
+def unmute(message):
+    if message.reply_to_message:
+        try:
+            bot.restrict_chat_member(
+                chat_id=message.chat.id,
+                user_id=message.reply_to_message.from_user.id,
+                permissions=ChatPermissions(can_send_messages=True)
+            )
+            bot.send_message(message.chat.id, "🔊 Пользователь размучен.")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"Ошибка: {e}")
+    else:
+        bot.reply_to(message, "Ответь на сообщение пользователя.")
 
-📌 Команда старт/хелп
+# /ban
+@bot.message_handler(commands=['ban'])
+def ban(message):
+    if message.reply_to_message:
+        try:
+            bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+            bot.send_message(message.chat.id, "⛔ Пользователь забанен.")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"Ошибка: {e}")
+    else:
+        bot.reply_to(message, "Ответь на сообщение пользователя.")
 
-@bot.message_handler(commands=['start', 'help']) def send_welcome(message): markup = types.ReplyKeyboardMarkup(resize_keyboard=True) markup.add("/joke", "/fact", "/meme", "/youtube", "/tiktok") bot.send_message(message.chat.id, "👋 Привет! Я — MultiBotX. Вот что я умею:", reply_markup=markup)
+# /unban
+@bot.message_handler(commands=['unban'])
+def unban(message):
+    if message.reply_to_message:
+        try:
+            bot.unban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+            bot.send_message(message.chat.id, "✅ Пользователь разбанен.")
+        except Exception as e:
+            bot.send_message(message.chat.id, f"Ошибка: {e}")
+    else:
+        bot.reply_to(message, "Ответь на сообщение пользователя.")
 
-⚠️ Предупреждение
+# 📥 /yt — Скачать видео с YouTube
+@bot.message_handler(commands=['yt'])
+def download_youtube(message):
+    try:
+        url = message.text.split(' ', 1)[1]
+    except:
+        return bot.reply_to(message, "Укажи ссылку: /yt <ссылка>")
 
-@bot.message_handler(commands=['warn']) def warn_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответьте на сообщение пользователя, чтобы выдать предупреждение.") user_id = message.reply_to_message.from_user.id warns[user_id] = warns.get(user_id, 0) + 1 bot.reply_to(message, f"⚠️ Пользователю выдано предупреждение ({warns[user_id]}).")
+    headers = {
+        "X-RapidAPI-Key": SAVETUBE_API_KEY,
+        "X-RapidAPI-Host": "save-tube-video.p.rapidapi.com"
+    }
+    params = {"url": url}
 
-🔇 Мут
+    r = requests.get("https://save-tube-video.p.rapidapi.com/download", headers=headers, params=params)
+    data = r.json()
 
-@bot.message_handler(commands=['mute']) def mute_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответьте на сообщение пользователя, чтобы выдать мут.") user_id = message.reply_to_message.from_user.id until_date = datetime.now() + timedelta(minutes=10) bot.restrict_chat_member(message.chat.id, user_id, until_date=until_date, permissions=types.ChatPermissions(can_send_messages=False)) mutes[user_id] = until_date bot.reply_to(message, "🔇 Пользователь замучен на 10 минут.")
+    if "video_url" in data:
+        video = data["video_url"]
+        bot.send_message(message.chat.id, f"🎬 Видео с YouTube:\n{video}")
+    else:
+        bot.send_message(message.chat.id, "❌ Не удалось получить ссылку на видео.")
 
-🔈 Размут
+# 📥 /tt — Скачать видео из TikTok
+@bot.message_handler(commands=['tt'])
+def download_tiktok(message):
+    try:
+        url = message.text.split(' ', 1)[1]
+    except:
+        return bot.reply_to(message, "Укажи ссылку: /tt <ссылка>")
 
-@bot.message_handler(commands=['unmute']) def unmute_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответьте на сообщение пользователя, чтобы размутить.") user_id = message.reply_to_message.from_user.id bot.restrict_chat_member(message.chat.id, user_id, permissions=types.ChatPermissions(can_send_messages=True)) mutes.pop(user_id, None) bot.reply_to(message, "🔈 Пользователь размучен.")
+    headers = {
+        "X-RapidAPI-Key": SAVETUBE_API_KEY,
+        "X-RapidAPI-Host": "save-tube-video.p.rapidapi.com"
+    }
+    params = {"url": url}
 
-⛔️ Бан
+    r = requests.get("https://save-tube-video.p.rapidapi.com/download", headers=headers, params=params)
+    data = r.json()
 
-@bot.message_handler(commands=['ban']) def ban_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответьте на сообщение пользователя, чтобы забанить.") user_id = message.reply_to_message.from_user.id bot.ban_chat_member(message.chat.id, user_id) bot.reply_to(message, "⛔️ Пользователь забанен.")
+    if "video_url" in data:
+        video = data["video_url"]
+        bot.send_message(message.chat.id, f"📹 Видео из TikTok:\n{video}")
+    else:
+        bot.send_message(message.chat.id, "❌ Не удалось получить ссылку на видео.")
 
-✅ Разбан
-
-@bot.message_handler(commands=['unban']) def unban_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответьте на сообщение пользователя, чтобы разбанить.") user_id = message.reply_to_message.from_user.id bot.unban_chat_member(message.chat.id, user_id) bot.reply_to(message, "✅ Пользователь разбанен.")
-
-😂 Шутка
-
-@bot.message_handler(commands=['joke']) def send_joke(message): bot.send_message(message.chat.id, random.choice(jokes))
-
-🤓 Факт
-
-@bot.message_handler(commands=['fact']) def send_fact(message): bot.send_message(message.chat.id, random.choice(facts))
-
-📷 Мем (рандомное изображение кота как мем)
-
-@bot.message_handler(commands=['meme']) def send_meme(message): url = "https://cataas.com/cat" bot.send_photo(message.chat.id, url, caption="Вот тебе мем 😹")
-
-📥 Скачивание YouTube
-
-@bot.message_handler(commands=['youtube']) def download_youtube(message): bot.send_message(message.chat.id, "🔗 Отправь ссылку на видео YouTube") bot.register_next_step_handler(message, process_youtube)
-
-def process_youtube(message): url = message.text api_url = f"https://save-tube.p.rapidapi.com/download" headers = { "X-RapidAPI-Key": SAVETUBE_API_KEY, "X-RapidAPI-Host": "save-tube.p.rapidapi.com" } params = {"url": url} try: response = requests.get(api_url, headers=headers, params=params) data = response.json() video_url = data.get("video", [{}])[0].get("url") if video_url: bot.send_message(message.chat.id, f"Вот ссылка на скачивание: {video_url}") else: bot.send_message(message.chat.id, "❌ Не удалось получить видео.") except Exception as e: bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
-
-📥 Скачивание TikTok
-
-@bot.message_handler(commands=['tiktok']) def download_tiktok(message): bot.send_message(message.chat.id, "🔗 Отправь ссылку на видео TikTok") bot.register_next_step_handler(message, process_tiktok)
-
-def process_tiktok(message): url = message.text api_url = f"https://save-tube.p.rapidapi.com/download" headers = { "X-RapidAPI-Key": SAVETUBE_API_KEY, "X-RapidAPI-Host": "save-tube.p.rapidapi.com" } params = {"url": url} try: response = requests.get(api_url, headers=headers, params=params) data = response.json() video_url = data.get("video", [{}])[0].get("url") if video_url: bot.send_message(message.chat.id, f"Вот ссылка на скачивание: {video_url}") else: bot.send_message(message.chat.id, "❌ Не удалось получить видео.") except Exception as e: bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
-
-🚀 Запуск бота
-
-bot.remove_webhook() bot.polling(none_stop=True)
-
+# 🌀 Запуск бота
+if __name__ == '__main__':
+    bot.remove_webhook()
+    bot.polling(none_stop=True)
