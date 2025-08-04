@@ -52,5 +52,5 @@ TOKEN = os.getenv("TOKEN") bot = telebot.TeleBot(TOKEN) app = Flask(name)
 
 def start_bot(): bot.remove_webhook() bot.infinity_polling()
 
-if name == 'main': Thread(target=start_bot).start() app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+if name == 'main': Thread(target=start_bot).start() app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))) 
 
