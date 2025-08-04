@@ -235,4 +235,4 @@ def run():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
 Thread(target=run).start()
-application.run_polling()
+application.run_polling() 
