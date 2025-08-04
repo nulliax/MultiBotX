@@ -4,94 +4,93 @@ from flask import Flask, request
 from threading import Thread
 import random
 
+# Получаем токен из переменной окружения
 TOKEN = os.getenv("TOKEN")
-if TOKEN is None:
-    raise ValueError("❌ Переменная окружения TOKEN не задана.")
-
 bot = telebot.TeleBot(TOKEN)
+
 app = Flask(__name__)
 
-# ===================== Flask Ping =====================
+# ========== FLASK ==========
 @app.route('/')
 def index():
-    return "✅ MultiBotX работает!"
+    return "MultiBotX is alive!"
 
-# ===================== Команды =====================
+# ========== Старт / помощь ==========
 @bot.message_handler(commands=['start', 'help'])
-def start_help(message):
-    bot.send_message(message.chat.id, "👋 Привет! Я многофункциональный бот MultiBotX.\n\nНапиши /menu, чтобы увидеть всё, что я умею.")
+def send_welcome(message):
+    bot.send_message(message.chat.id, "👋 Привет! Я бот MultiBotX. Напиши /menu, чтобы увидеть доступные команды.")
 
-# ===================== Модерация =====================
+# ========== Модерация ==========
 @bot.message_handler(commands=['warn'])
 def warn_user(message):
     if not message.reply_to_message:
-        return bot.send_message(message.chat.id, "⚠️ Ответь на сообщение пользователя, чтобы выдать предупреждение.")
-    bot.send_message(message.chat.id, f"⚠️ Предупреждение для {message.reply_to_message.from_user.first_name}")
+        return bot.reply_to(message, "Ответь на сообщение для предупреждения.")
+    bot.reply_to(message.reply_to_message, "⚠️ Предупреждение!")
 
 @bot.message_handler(commands=['mute'])
 def mute_user(message):
     if not message.reply_to_message:
-        return bot.send_message(message.chat.id, "🔇 Ответь на сообщение пользователя для мута.")
+        return bot.reply_to(message, "Ответь на сообщение для мута.")
     try:
         bot.restrict_chat_member(
             message.chat.id,
             message.reply_to_message.from_user.id,
             permissions=telebot.types.ChatPermissions(can_send_messages=False)
         )
-        bot.send_message(message.chat.id, "🔇 Пользователь замьючен.")
+        bot.reply_to(message.reply_to_message, "🔇 Пользователь замьючен.")
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
 @bot.message_handler(commands=['unmute'])
 def unmute_user(message):
     if not message.reply_to_message:
-        return bot.send_message(message.chat.id, "🔊 Ответь на сообщение пользователя для размута.")
+        return bot.reply_to(message, "Ответь на сообщение для размута.")
     try:
         bot.restrict_chat_member(
             message.chat.id,
             message.reply_to_message.from_user.id,
             permissions=telebot.types.ChatPermissions(can_send_messages=True)
         )
-        bot.send_message(message.chat.id, "🔊 Пользователь размьючен.")
+        bot.reply_to(message.reply_to_message, "🔊 Пользователь размьючен.")
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
 @bot.message_handler(commands=['ban'])
 def ban_user(message):
     if not message.reply_to_message:
-        return bot.send_message(message.chat.id, "🚫 Ответь на сообщение пользователя для бана.")
+        return bot.reply_to(message, "Ответь на сообщение для бана.")
     try:
         bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
-        bot.send_message(message.chat.id, "🚫 Пользователь забанен.")
+        bot.reply_to(message.reply_to_message, "🚫 Пользователь забанен.")
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
 @bot.message_handler(commands=['unban'])
 def unban_user(message):
     if not message.reply_to_message:
-        return bot.send_message(message.chat.id, "✅ Ответь на сообщение пользователя для разбанивания.")
+        return bot.reply_to(message, "Ответь на сообщение для разбана.")
     try:
         bot.unban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
-        bot.send_message(message.chat.id, "✅ Пользователь разбанен.")
+        bot.reply_to(message.reply_to_message, "✅ Пользователь разбанен.")
     except Exception as e:
-        bot.send_message(message.chat.id, f"Ошибка: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
-# ===================== Шутки =====================
+# ========== Развлечения ==========
 jokes = [
-    "Почему компьютер не может похудеть? Потому что он ест байты! 😂",
-    "Что говорит Python после выполнения программы? 'Выход' 🐍",
-    "Программист заходит в бар... и не выходит никогда. 🍻",
+    "Почему компьютер не может похудеть? Потому что он ест байты!",
+    "Программист заходит в бар... и не выходит никогда.",
+    "Что скажет Python, когда закончит программу? 'Выход'."
 ]
 
 @bot.message_handler(commands=['joke'])
-def send_joke(message):
+def tell_joke(message):
     bot.send_message(message.chat.id, random.choice(jokes))
 
-# ===================== Запуск =====================
-def start_bot():
+# ========== Запуск ==========
+def run_bot():
     bot.remove_webhook()
     bot.infinity_polling()
 
 if __name__ == '__main__':
-    Thread(target=start_bot).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    Thread(target=run_bot).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
