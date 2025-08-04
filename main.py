@@ -1,238 +1,64 @@
-import os
-import random
-import time
-import logging
-import requests
-from datetime import datetime, timedelta
-from flask import Flask, request
-from threading import Thread
-from collections import defaultdict
-from telegram import Update, ChatPermissions
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters,
-    ContextTypes, CallbackContext
-)
+main.py
 
-# Настройки
-TOKEN = os.getenv("TOKEN")
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+import os import random import datetime import logging from flask import Flask, request import telebot import requests from threading import Thread
 
-# Данные
-warns = defaultdict(int)
-donke_data = defaultdict(lambda: {'liters': 0, 'last': None})
-log_data = []
-start_time = time.time()
+TOKEN = os.getenv("BOT_TOKEN") SAVETUBE_KEY = os.getenv("SAVETUBE_KEY") ADMIN_IDS = [123456789]  # Заменить на реальные Telegram ID админов
 
-# Шутки и цитаты
-jokes = [
-    "Почему программисты не любят природу? Там слишком много багов.",
-    "Интернет без котиков — это просто кабель.",
-    "Я не лентяй, я в режиме энергосбережения."
-]
+bot = telebot.TeleBot(TOKEN) app = Flask(name)
 
-donke_jokes = [
-    "Donke настолько тупой, что думает, что RAM — это барашек.",
-    "Donke попытался сесть в интернет… теперь у него синяк.",
-    "Donke — это ошибка 404: интеллект не найден.",
-    "Donke — живое доказательство, что деградация возможна."
-]
+logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
 
-quotes = [
-    "Будь собой — прочие роли уже заняты.",
-    "Не бойся идти медленно, бойся стоять на месте.",
-    "Тот, кто хочет — ищет возможность, кто не хочет — оправдание.",
-    "Каждое утро мы рождаемся вновь. Что мы делаем сегодня — важнее всего."
-]
+====== ПЕРЕМЕННЫЕ ДЛЯ ХРАНЕНИЯ ДАННЫХ =======
 
-facts = [
-    "Муравьи никогда не спят.",
-    "Осьминоги имеют три сердца.",
-    "Самая большая снежинка — 38 см.",
-    "Пчёлы могут узнавать лица людей."
-]
+user_warns = {} camdonke_data = {}
 
-# Flask
-@app.route('/')
-def index():
-    return "MultiBotX is running!"
+====== ФУНКЦИИ УТИЛИТЫ =======
 
-@app.route('/' + TOKEN, methods=['POST'])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
-    return 'ok'
+def is_admin(user_id): return user_id in ADMIN_IDS
 
-# Хэндлеры
+def get_random_joke(): jokes = [ "Как программист чинит лампочку? Он меняет весь дом.", "Почему айтишники любят зиму? Потому что снег – это фича, а не баг.", "Почему Java-разработчики носят очки? Потому что они не C#", # ... добавь больше ] return random.choice(jokes)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Я — MultiBotX. Напиши /help чтобы узнать, что я умею.")
+def get_donke_joke(): jokes = [ "Donke настолько тупой, что его даже ИИ не хочет оскорблять.", "Donke - это баг, который никто не стал фиксить.", "Donke не тормозит, он просто ещё не загрузился...", # ... добавь ещё ] return random.choice(jokes)
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🧠 *Команды:*\n"
-        "- /joke — случайная шутка\n"
-        "- /donke — чёрный юмор про Donke\n"
-        "- /fact — случайный факт\n"
-        "- /quote — мотивационная цитата\n"
-        "- /cat /dog — фото котиков и собак\n"
-        "- /dice — бросок кубика 🎲\n"
-        "- /camdonke — 💦 заливка в Донке\n"
-        "- /topdonke — рейтинг донкозаливателей\n"
-        "- /stats — статистика\n"
-        "- /log — лог активности\n"
-        "- Просто ответь на сообщение с текстом мут, бан, варн и т.д."
-    , parse_mode='Markdown')
+def get_quote(): quotes = [ "Никогда не сдавайся! Даже если ты Donke.", "Сила в терпении... и в mute.", "Падая семь раз — поднимайся восемь.", # ... больше мотивации ] return random.choice(quotes)
 
-async def joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(jokes))
+def get_fact(): facts = [ "Коты спят в среднем 70% своей жизни.", "Вода может существовать в трёх состояниях: жидкость, лёд и пар.", "Самый длинный фильм длится более 85 часов.", # ... больше фактов ] return random.choice(facts)
 
-async def donke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(donke_jokes))
+====== КОМАНДЫ =======
 
-async def fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(facts))
+@bot.message_handler(commands=['start']) def start(message): bot.reply_to(message, "Привет! Я MultiBotX. Пиши /help для списка команд.")
 
-async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(quotes))
+@bot.message_handler(commands=['help']) def help_cmd(message): bot.reply_to(message, "/joke — шутка\n/quote — цитата\n/fact — факт\n/cat — фото кота\n/dog — фото собаки\n/dice — бросить кубик\n/donke — шутка про Donke\n/camdonke — залить в Donke\n/topdonke — топ Donke\n/youtube <ссылка>\n/tiktok <ссылка>")
 
-async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = requests.get("https://api.thecatapi.com/v1/images/search").json()
-    await update.message.reply_photo(res[0]['url'])
+@bot.message_handler(commands=['joke']) def joke(message): bot.reply_to(message, get_random_joke())
 
-async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = requests.get("https://dog.ceo/api/breeds/image/random").json()
-    await update.message.reply_photo(res['message'])
+@bot.message_handler(commands=['quote']) def quote(message): bot.reply_to(message, get_quote())
 
-async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_dice()
+@bot.message_handler(commands=['fact']) def fact(message): bot.reply_to(message, get_fact())
 
-# Donke Кампания
-async def camdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_name = update.effective_user.first_name
-    today = datetime.utcnow().date()
-    data = donke_data[user_id]
+@bot.message_handler(commands=['cat']) def cat(message): r = requests.get("https://api.thecatapi.com/v1/images/search").json() bot.send_photo(message.chat.id, r[0]['url'])
 
-    if data['last'] == today:
-        await update.message.reply_text("💦 Вы уже залили в Донке сегодня! Возвращайтесь завтра.")
-        return
+@bot.message_handler(commands=['dog']) def dog(message): r = requests.get("https://dog.ceo/api/breeds/image/random").json() bot.send_photo(message.chat.id, r['message'])
 
-    liters = random.randint(1, 100)
-    data['liters'] += liters
-    data['last'] = today
+@bot.message_handler(commands=['dice']) def dice(message): bot.send_dice(message.chat.id)
 
-    await update.message.reply_text(
-        f"💦 Вы успешно залили в Донке {liters} литров спермы!\n"
-        f"Donke говорит спасибо... и стонет..."
-    )
+@bot.message_handler(commands=['donke']) def donke_joke(message): bot.reply_to(message, get_donke_joke())
 
-async def topdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top = sorted(donke_data.items(), key=lambda x: x[1]['liters'], reverse=True)[:50]
-    msg = "🏆 *Топ донатеров в Donke:*\n\n"
-    for i, (user_id, data) in enumerate(top, start=1):
-        msg += f"{i}. [id:{user_id}] — {data['liters']} литров\n"
-    await update.message.reply_text(msg, parse_mode='Markdown')
+@bot.message_handler(commands=['camdonke']) def camdonke(message): user_id = message.from_user.id today = datetime.date.today() if user_id in camdonke_data and camdonke_data[user_id]['date'] == today: bot.reply_to(message, "Сегодня вы уже залили в Donke. Приходите завтра!") else: amount = random.randint(1, 100) if user_id not in camdonke_data: camdonke_data[user_id] = {'total': 0} camdonke_data[user_id]['total'] += amount camdonke_data[user_id]['date'] = today bot.reply_to(message, f"Вы успешно влили {amount} литров в Donke! Donke захлёбывается от счастья.")
 
-# Видео загрузка
-async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
-    if "tiktok.com" in url:
-        api_url = f"https://api.tikmate.app/api/lookup?url={url}"
-    elif "youtube.com" in url or "youtu.be" in url:
-        api_url = f"https://api.yt1s.com/api/ajaxSearch/index?q={url}&vt=home"
-    else:
-        await update.message.reply_text("❌ Это не ссылка на видео.")
-        return
+@bot.message_handler(commands=['topdonke']) def top_donke(message): if not camdonke_data: bot.reply_to(message, "Donke ещё пуст...") return sorted_users = sorted(camdonke_data.items(), key=lambda x: x[1]['total'], reverse=True) text = "🏆 ТОП-50 заливальщиков в Donke:\n" for i, (uid, data) in enumerate(sorted_users[:50], 1): text += f"{i}. {uid} — {data['total']} л.\n" bot.reply_to(message, text)
 
-    await update.message.reply_text("⏳ Пытаюсь скачать видео...")
+@bot.message_handler(commands=['youtube']) def youtube_dl(message): try: url = message.text.split(" ", 1)[1] bot.reply_to(message, "⏬ Пытаюсь скачать видео с YouTube...") r = requests.get(f"https://api.savetube.me/ytdl?key={SAVETUBE_KEY}&url={url}").json() video_url = r.get("url") if video_url: bot.send_video(message.chat.id, video_url) else: bot.reply_to(message, "Не удалось скачать видео.") except: bot.reply_to(message, "Неверная команда. Пример: /youtube <ссылка>")
 
-    try:
-        r = requests.get(api_url)
-        if r.status_code == 200:
-            await update.message.reply_text("✅ Видео успешно загружено (но функция требует доработки).")
-        else:
-            await update.message.reply_text("❌ Не удалось скачать. Попробуйте позже.")
-    except Exception as e:
-        await update.message.reply_text("❌ Ошибка при скачивании.")
+@bot.message_handler(commands=['tiktok']) def tiktok_dl(message): try: url = message.text.split(" ", 1)[1] bot.reply_to(message, "⏬ Пытаюсь скачать видео из TikTok...") r = requests.get(f"https://api.savetube.me/ttdl?key={SAVETUBE_KEY}&url={url}").json() video_url = r.get("url") if video_url: bot.send_video(message.chat.id, video_url) else: bot.reply_to(message, "Не удалось скачать видео.") except: bot.reply_to(message, "Неверная команда. Пример: /tiktok <ссылка>")
 
-# Модерация
-async def moderation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.reply_to_message:
-        text = update.message.text.lower()
-        target = update.message.reply_to_message.from_user
-        chat_id = update.effective_chat.id
+====== ЗАПУСК ФЛАСК =======
 
-        try:
-            if "варн" in text:
-                warns[target.id] += 1
-                await update.message.reply_text(f"⚠️ Предупреждение для {target.first_name} ({warns[target.id]}/3)")
-            elif "мут" in text:
-                await context.bot.restrict_chat_member(chat_id, target.id, ChatPermissions(can_send_messages=False))
-                await update.message.reply_text(f"🔇 {target.first_name} был замучен.")
-            elif "размут" in text or "анмут" in text:
-                await context.bot.restrict_chat_member(chat_id, target.id, ChatPermissions(can_send_messages=True))
-                await update.message.reply_text(f"🔊 {target.first_name} был размучен.")
-            elif "бан" in text:
-                await context.bot.ban_chat_member(chat_id, target.id)
-                await update.message.reply_text(f"⛔ {target.first_name} забанен.")
-            elif "разбан" in text or "унбан" in text:
-                await context.bot.unban_chat_member(chat_id, target.id)
-                await update.message.reply_text(f"✅ {target.first_name} разбанен.")
-        except:
-            await update.message.reply_text("❌ У меня нет прав для этого.")
+@app.route(f"/{TOKEN}", methods=['POST']) def webhook(): bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))]) return "OK", 200
 
-# Автофункции
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    for member in update.message.new_chat_members:
-        await update.message.reply_text(f"👋 Добро пожаловать, {member.first_name}!")
+@app.route("/") def index(): return "MultiBotX online."
 
-async def mat_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.lower()
-    if any(mat in msg for mat in ["бляд", "сука", "нах", "чмо", "пид", "хуй"]):
-        await update.message.delete()
+def run(): app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
 
-# Статистика
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uptime = int(time.time() - start_time)
-    users = len(donke_data)
-    await update.message.reply_text(f"📊 Uptime: {uptime//60} минут\n👤 Пользователей: {users}")
+if name == "main": Thread(target=run).start() bot.remove_webhook() bot.set_webhook(url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TOKEN}")
 
-async def log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if log_data:
-        await update.message.reply_text("🗂️ Лог:\n" + "\n".join(log_data[-10:]))
-    else:
-        await update.message.reply_text("📭 Лог пуст.")
-
-async def save_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_data.append(f"{update.effective_user.id}: {update.message.text}")
-
-# Настройка приложения
-application = Application.builder().token(TOKEN).build()
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_command))
-application.add_handler(CommandHandler("joke", joke))
-application.add_handler(CommandHandler("donke", donke))
-application.add_handler(CommandHandler("fact", fact))
-application.add_handler(CommandHandler("quote", quote))
-application.add_handler(CommandHandler("cat", cat))
-application.add_handler(CommandHandler("dog", dog))
-application.add_handler(CommandHandler("dice", dice))
-application.add_handler(CommandHandler("camdonke", camdonke))
-application.add_handler(CommandHandler("topdonke", topdonke))
-application.add_handler(CommandHandler("stats", stats))
-application.add_handler(CommandHandler("log", log))
-
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderation))
-application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'https?://'), download_video))
-application.add_handler(MessageHandler(filters.TEXT, save_log))
-application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-application.add_handler(MessageHandler(filters.TEXT, mat_filter))
-
-# Запуск Flask
-def run():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
-Thread(target=run).start()
-application.run_polling() 
