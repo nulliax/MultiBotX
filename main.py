@@ -1,56 +1,183 @@
-import os import telebot import requests import random from flask import Flask, request from threading import Thread from telebot import types
+import os
+import random
+import requests
+from flask import Flask, request
+from threading import Thread
+import telebot
+from telebot import types
 
-TOKEN = os.getenv("TOKEN") bot = telebot.TeleBot(TOKEN) app = Flask(name)
+# ===================== Конфигурация =====================
+TOKEN = os.getenv("TOKEN")
+SAVETUBE_KEY = os.getenv("SAVETUBE_KEY")
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-===================== Flask Ping =====================
+# ===================== Главная страница =====================
+@app.route('/')
+def home():
+    return "🤖 MultiBotX работает!"
 
-@app.route('/') def home(): return "MultiBotX is running!"
+# ===================== МЕНЮ =====================
+@bot.message_handler(commands=['start', 'help', 'menu'])
+def send_menu(message):
+    menu_text = (
+        "👋 Привет! Я *MultiBotX* — универсальный бот с множеством возможностей:\n\n"
+        "🎛 *Модерация:*\n"
+        "  • /warn – Предупреждение\n"
+        "  • /mute – Мут\n"
+        "  • /unmute – Размут\n"
+        "  • /ban – Бан\n"
+        "  • /unban – Разбан\n\n"
+        "🎉 *Развлечения:*\n"
+        "  • /joke – Шутка\n"
+        "  • /fact – Интересный факт\n"
+        "  • /quote – Цитата\n"
+        "  • /cat – Фото котика\n"
+        "  • /dice – Бросить кубик 🎲\n"
+        "  • /inspire – Мотивация 💡\n\n"
+        "📥 *Скачивание видео:*\n"
+        "  Просто отправь ссылку с YouTube или TikTok, и я скачаю видео!"
+    )
+    bot.send_message(message.chat.id, menu_text, parse_mode="Markdown")
 
-===================== Команды /start /help =====================
+# ===================== Модерация =====================
+@bot.message_handler(commands=['warn'])
+def warn_user(message):
+    if not message.reply_to_message:
+        return bot.reply_to(message, "⚠️ Ответь на сообщение пользователя, чтобы выдать предупреждение.")
+    bot.reply_to(message.reply_to_message, "⚠️ Предупреждение!")
 
-@bot.message_handler(commands=['start', 'help']) def send_welcome(message): bot.send_message(message.chat.id, "👋 Привет! Я многофункциональный бот MultiBotX. Вот что я умею:\n/menu – Главное меню\n/joke – Шутка\n/fact – Интересный факт\n/quote – Цитата\n/meme – Мем\n/cat – Кот\n/dice – Бросить кубик")
+@bot.message_handler(commands=['mute'])
+def mute_user(message):
+    if not message.reply_to_message:
+        return bot.reply_to(message, "Ответь на сообщение пользователя для мута.")
+    try:
+        bot.restrict_chat_member(message.chat.id, message.reply_to_message.from_user.id,
+                                 permissions=types.ChatPermissions(can_send_messages=False))
+        bot.reply_to(message.reply_to_message, "🔇 Пользователь был замьючен.")
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
 
-===================== Главное меню =====================
+@bot.message_handler(commands=['unmute'])
+def unmute_user(message):
+    if not message.reply_to_message:
+        return bot.reply_to(message, "Ответь на сообщение пользователя для размута.")
+    try:
+        bot.restrict_chat_member(message.chat.id, message.reply_to_message.from_user.id,
+                                 permissions=types.ChatPermissions(can_send_messages=True))
+        bot.reply_to(message.reply_to_message, "🔊 Пользователь размьючен.")
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
 
-@bot.message_handler(commands=['menu']) def menu(message): markup = types.ReplyKeyboardMarkup(resize_keyboard=True) buttons = ["🎲 Кубик", "😹 Котик", "🧠 Факт", "🤣 Шутка", "📜 Цитата", "🖼 Мем"] markup.add(*buttons) bot.send_message(message.chat.id, "Выбери опцию:", reply_markup=markup)
+@bot.message_handler(commands=['ban'])
+def ban_user(message):
+    if not message.reply_to_message:
+        return bot.reply_to(message, "Ответь на сообщение пользователя для бана.")
+    try:
+        bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+        bot.reply_to(message.reply_to_message, "🚫 Пользователь забанен.")
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
 
-===================== Модерация =====================
+@bot.message_handler(commands=['unban'])
+def unban_user(message):
+    if not message.reply_to_message:
+        return bot.reply_to(message, "Ответь на сообщение пользователя для разбанивания.")
+    try:
+        bot.unban_chat_member(message.chat.id, message.reply_to_message.from_user.id)
+        bot.reply_to(message.reply_to_message, "✅ Пользователь разбанен.")
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
 
-@bot.message_handler(commands=['warn']) def warn_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответь на сообщение пользователя, чтобы выдать предупреждение.") bot.reply_to(message.reply_to_message, "⚠️ Предупреждение!")
+# ===================== Развлечения =====================
+jokes = [
+    "Почему компьютер не может похудеть? Потому что он ест байты!",
+    "Что скажет Python, когда закончит программу? 'Выход'.",
+    "Программист заходит в бар... и не выходит никогда.",
+]
 
-@bot.message_handler(commands=['mute']) def mute_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответь на сообщение пользователя для мута.") try: bot.restrict_chat_member(message.chat.id, message.reply_to_message.from_user.id, permissions=types.ChatPermissions(can_send_messages=False)) bot.reply_to(message.reply_to_message, "🔇 Пользователь был замьючен.") except Exception as e: bot.reply_to(message, f"Ошибка: {e}")
+facts = [
+    "💡 Самая длинная программа в мире — это человеческий геном.",
+    "💡 Первый компьютер весил более 27 тонн.",
+    "💡 Первая электронная почта была отправлена в 1971 году.",
+]
 
-@bot.message_handler(commands=['unmute']) def unmute_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответь на сообщение пользователя для размута.") try: bot.restrict_chat_member(message.chat.id, message.reply_to_message.from_user.id, permissions=types.ChatPermissions(can_send_messages=True)) bot.reply_to(message.reply_to_message, "🔊 Пользователь размьючен.") except Exception as e: bot.reply_to(message, f"Ошибка: {e}")
+quotes = [
+    "🔹 «Будь собой, остальные роли уже заняты.» – Оскар Уайльд",
+    "🔹 «Жизнь — это то, что с тобой происходит, пока ты строишь планы.» – Джон Леннон",
+    "🔹 «Сила не в том, чтобы никогда не падать, а в том, чтобы подниматься каждый раз.» – Конфуций",
+]
 
-@bot.message_handler(commands=['ban']) def ban_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответь на сообщение пользователя для бана.") try: bot.ban_chat_member(message.chat.id, message.reply_to_message.from_user.id) bot.reply_to(message.reply_to_message, "🚫 Пользователь забанен.") except Exception as e: bot.reply_to(message, f"Ошибка: {e}")
+@bot.message_handler(commands=['joke'])
+def tell_joke(message):
+    bot.send_message(message.chat.id, random.choice(jokes))
 
-@bot.message_handler(commands=['unban']) def unban_user(message): if not message.reply_to_message: return bot.reply_to(message, "Ответь на сообщение пользователя для разбанивания.") try: bot.unban_chat_member(message.chat.id, message.reply_to_message.from_user.id) bot.reply_to(message.reply_to_message, "✅ Пользователь разбанен.") except Exception as e: bot.reply_to(message, f"Ошибка: {e}")
+@bot.message_handler(commands=['fact'])
+def tell_fact(message):
+    bot.send_message(message.chat.id, random.choice(facts))
 
-===================== Развлечения =====================
+@bot.message_handler(commands=['quote'])
+def tell_quote(message):
+    bot.send_message(message.chat.id, random.choice(quotes))
 
-@bot.message_handler(commands=['joke']) def tell_joke(message): jokes = [ "Почему компьютер не может похудеть? Потому что он ест байты!", "Что скажет Python, когда закончит программу? 'Выход'.", "Программист заходит в бар... и не выходит никогда." ] bot.send_message(message.chat.id, random.choice(jokes))
+@bot.message_handler(commands=['cat'])
+def send_cat_photo(message):
+    try:
+        r = requests.get("https://api.thecatapi.com/v1/images/search").json()
+        bot.send_photo(message.chat.id, r[0]['url'])
+    except Exception:
+        bot.send_message(message.chat.id, "😿 Не удалось получить котика.")
 
-@bot.message_handler(commands=['fact']) def fact(message): facts = [ "Земля вращается со скоростью 1670 км/ч.", "Мозг человека на 75% состоит из воды.", "Осьминоги имеют три сердца." ] bot.send_message(message.chat.id, random.choice(facts))
+@bot.message_handler(commands=['inspire'])
+def inspire(message):
+    inspirations = [
+        "🔥 Никогда не сдавайся. Великие дела требуют времени.",
+        "🚀 Сегодняшние усилия — это завтрашние результаты.",
+        "💪 Самое трудное — начать. Дальше будет легче!"
+    ]
+    bot.send_message(message.chat.id, random.choice(inspirations))
 
-@bot.message_handler(commands=['quote']) def quote(message): quotes = [ "Будь изменением, которое хочешь видеть в мире. – Махатма Ганди", "Тот, кто хочет – ищет возможности, кто не хочет – ищет причины.", "Сложности делают нас сильнее." ] bot.send_message(message.chat.id, random.choice(quotes))
+@bot.message_handler(commands=['dice'])
+def roll_dice(message):
+    bot.send_dice(message.chat.id)
 
-@bot.message_handler(commands=['meme']) def meme(message): try: url = requests.get("https://meme-api.com/gimme").json()["url"] bot.send_photo(message.chat.id, url) except: bot.send_message(message.chat.id, "Не удалось загрузить мем 😞")
+# ===================== Скачивание видео =====================
+def download_video_from_url(url):
+    api_url = "https://save-tube-video-download.p.rapidapi.com/download"
+    headers = {
+        "X-RapidAPI-Key": SAVETUBE_KEY,
+        "X-RapidAPI-Host": "save-tube-video-download.p.rapidapi.com"
+    }
+    params = {"url": url}
+    try:
+        response = requests.get(api_url, headers=headers, params=params, timeout=15)
+        data = response.json()
+        if data and isinstance(data.get("links"), list):
+            for item in data["links"]:
+                if item.get("type") == "mp4" and item.get("url"):
+                    return item["url"]
+    except Exception as e:
+        print("Ошибка скачивания:", e)
+    return None
 
-@bot.message_handler(commands=['cat']) def cat(message): try: url = requests.get("https://api.thecatapi.com/v1/images/search").json()[0]["url"] bot.send_photo(message.chat.id, url) except: bot.send_message(message.chat.id, "Не удалось загрузить котика 🐱")
+@bot.message_handler(func=lambda m: "tiktok.com" in m.text or "youtu" in m.text)
+def handle_video(message):
+    bot.send_chat_action(message.chat.id, 'upload_video')
+    bot.send_message(message.chat.id, "⏬ Пытаюсь скачать видео...")
+    video_link = download_video_from_url(message.text.strip())
+    if video_link:
+        try:
+            bot.send_video(message.chat.id, video_link)
+        except Exception:
+            bot.send_message(message.chat.id, "🎬 Видео слишком большое. Вот ссылка:\n" + video_link)
+    else:
+        bot.send_message(message.chat.id, "❌ Не удалось скачать видео. Попробуй другую ссылку.")
 
-@bot.message_handler(commands=['dice']) def roll_dice(message): bot.send_dice(message.chat.id)
+# ===================== Запуск =====================
+def start_bot():
+    bot.remove_webhook()
+    bot.infinity_polling()
 
-===================== Обработка кнопок =====================
-
-@bot.message_handler(func=lambda m: True) def handle_buttons(message): text = message.text.lower() if "котик" in text: cat(message) elif "мем" in text: meme(message) elif "шутка" in text: tell_joke(message) elif "цитата" in text: quote(message) elif "факт" in text: fact(message) elif "кубик" in text: roll_dice(message)
-
-===================== Приветствие новых =====================
-
-@bot.chat_member_handler() def greet_new_member(update): if update.new_chat_member: bot.send_message(update.chat.id, f"👋 Добро пожаловать, {update.new_chat_member.user.first_name}!")
-
-===================== Запуск =====================
-
-def start_bot(): bot.remove_webhook() bot.infinity_polling()
-
-if name == 'main': Thread(target=start_bot).start() app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000))) 
-
+if __name__ == '__main__':
+    Thread(target=start_bot).start()
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
