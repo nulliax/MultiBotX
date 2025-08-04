@@ -1,1 +1,3 @@
-pip install pytelegrambotapi flask requests
+pytelegrambotapi
+flask
+requests
