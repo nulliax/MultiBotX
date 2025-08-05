@@ -1,248 +1,231 @@
 import os
-import random
 import logging
+import random
+import re
+import threading
 from flask import Flask, request
-from telegram import Update, ChatPermissions, InputFile
+from dotenv import load_dotenv
+from telegram import Update, ChatPermissions, InputMediaPhoto
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    filters, ContextTypes, CallbackContext
 )
 import requests
-from datetime import datetime, timedelta
-from collections import defaultdict
+import yt_dlp
 
-# Настройка логов
+# Загрузка переменных окружения
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+PORT = int(os.environ.get("PORT", 8443))
+
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("BOT_TOKEN")
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "MultiBotX_bot")
+# Flask сервер
+flask_app = Flask(__name__)
 
-# Flask
-app = Flask(__name__)
+# Telegram Application
+app = ApplicationBuilder().token(TOKEN).build()
 
-# Донке рейтинг
-donke_ratings = defaultdict(int)
-last_camdonke_time = {}
+# ============================
+#        МОДЕРАЦИЯ
+# ============================
 
-# База шуток
+warns = {}
+
+async def warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        user_id = update.message.reply_to_message.from_user.id
+        warns[user_id] = warns.get(user_id, 0) + 1
+        await update.message.reply_text(f"⚠️ Предупреждение выдано. Всего: {warns[user_id]}")
+        if warns[user_id] >= 3:
+            await update.effective_chat.ban_member(user_id)
+            await update.message.reply_text("❌ Пользователь забанен за 3 предупреждения.")
+            warns[user_id] = 0
+    else:
+        await update.message.reply_text("⚠️ Используй команду в ответ на сообщение.")
+
+async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        await update.effective_chat.restrict_member(
+            update.message.reply_to_message.from_user.id,
+            ChatPermissions(can_send_messages=False)
+        )
+        await update.message.reply_text("🔇 Пользователь замучен.")
+    else:
+        await update.message.reply_text("Ответь на сообщение пользователя для мута.")
+
+async def unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        await update.effective_chat.restrict_member(
+            update.message.reply_to_message.from_user.id,
+            ChatPermissions(can_send_messages=True,
+                            can_send_media_messages=True,
+                            can_send_other_messages=True,
+                            can_add_web_page_previews=True)
+        )
+        await update.message.reply_text("🔊 Пользователь размучен.")
+    else:
+        await update.message.reply_text("Ответь на сообщение пользователя.")
+
+async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        await update.effective_chat.ban_member(update.message.reply_to_message.from_user.id)
+        await update.message.reply_text("🚫 Пользователь забанен.")
+    else:
+        await update.message.reply_text("Ответь на сообщение пользователя.")
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.reply_to_message:
+        await update.effective_chat.unban_member(update.message.reply_to_message.from_user.id)
+        await update.message.reply_text("✅ Пользователь разбанен.")
+    else:
+        await update.message.reply_text("Ответь на сообщение пользователя.")
+
+# ============================
+#        РАЗВЛЕЧЕНИЯ
+# ============================
+
 jokes = [
-    "Почему программисты любят зиму? Потому что можно ставить снежные точки.",
-    "Какая разница между политиком и котом? Кот хотя бы не врёт в глаза.",
-    "Я спросил у Siri: «Где моя девушка?» Она ответила: «В параллельной реальности».",
-    "Системный администратор — это волшебник, только без мантии и с кофе.",
-    "Если не работает — перезагрузи. Не помогает? Перезагрузи ещё раз.",
-    "Google знает о тебе больше, чем твоя мама.",
-    "Главное в жизни — не сдаваться. Особенно интернету.",
-    "Python — это когда всё просто. До момента, пока не станет сложно.",
-    "Не бейся головой об клавиатуру... хотя... может получиться пароль.",
-    "Работаешь? Молодец. Не работаешь? Молодец, отдыхать тоже надо."
-]
-
-quotes = [
-    "«Будь собой. Прочие роли уже заняты.» — Оскар Уайльд",
-    "«Мудрый человек требует всего от себя, ничтожный — от других.» — Лев Толстой",
-    "«Падая, поднимайся. Проигрывая, учись.» — Конфуций",
-    "«Лучше сделать и пожалеть, чем не сделать и пожалеть.» — Неизвестный философ",
-    "«Глуп тот, кто не учится на своих ошибках. Умён тот, кто учится на чужих.»",
-    "«Если долго смотреть в бездну, бездна начнёт смотреть в тебя.» — Ницше",
+    "Почему программисты путают Хэллоуин и Рождество? Потому что OCT 31 == DEC 25!",
+    "Как поймать белого медведя? Проруби в льду прорубь и рассыпь горох. Когда медведь придет собрать горох — бей его ледорубом!",
+    "Я бы пошутил про UDP… но ты не получишь."
 ]
 
 facts = [
-    "Муравьи никогда не спят.",
-    "У улиток три сердца.",
-    "Самая сильная мышца в теле — язык.",
-    "Шоколад может убить собаку.",
-    "Глаза страуса больше его мозга.",
-    "Крысы смеются, когда их щекотать.",
-    "Мёд не портится. Его можно есть спустя тысячи лет.",
-    "У осьминога три сердца и синяя кровь.",
+    "Факт: У улиток три сердца.",
+    "Факт: Самая длинная зарегистрированная продолжительность жизни у медузы – бессмертие.",
+    "Факт: У осьминога три сердца и синяя кровь."
 ]
 
-donke_phrases = [
-    "Donke разозлился и пошёл искать тебя.",
-    "Donke теперь знает, где ты живёшь.",
-    "Donke засмеялся, но это был последний смех в этом чате.",
-    "Donke съел Wi-Fi и теперь ты в оффлайне.",
-    "Donke... просто Donke.",
-    "Donke уже рядом.",
-    "Donke идёт за тобой, он уже в пути.",
+quotes = [
+    "“Жизнь — это то, что с тобой происходит, пока ты строишь планы.” — Джон Леннон",
+    "“Будь собой. Прочие роли уже заняты.” — Оскар Уайльд",
+    "“Лучшая месть — огромный успех.” — Фрэнк Синатра"
 ]
 
-banned_words = ["дурак", "тупой", "идиот", "лох", "петух"]  # и т.д.
+donke_jokes = [
+    "Donke пришёл в бар... Бар сломался.",
+    "Donke настолько тупой, что его IQ можно измерить отрицательными числами.",
+    "Если бы тупость была профессией, Donke получил бы Нобелевку."
+]
 
-# Приветствие
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.new_chat_members:
-        for user in update.message.new_chat_members:
-            await update.message.reply_text(f"👋 Добро пожаловать, {user.full_name}!")
-
-# Антимат
-async def filter_bad_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
-    if any(word in text for word in banned_words):
-        await update.message.reply_text("🚫 Не ругайся! Мат запрещён.")
-
-# Команды развлечений
 async def joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(random.choice(jokes))
 
-async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(quotes))
-
 async def fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(random.choice(facts))
+
+async def quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(random.choice(quotes))
 
 async def cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://cataas.com/cat"
     await update.message.reply_photo(photo=url)
 
 async def dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = "https://random.dog/woof.json"
-    data = requests.get(url).json()
-    await update.message.reply_photo(photo=data["url"])
+    url = requests.get("https://random.dog/woof.json").json()["url"]
+    await update.message.reply_photo(photo=url)
 
 async def meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://meme-api.com/gimme"
-    data = requests.get(url).json()
-    await update.message.reply_photo(photo=data["url"])
+    meme = requests.get(url).json()
+    await update.message.reply_photo(photo=meme["url"], caption=meme["title"])
 
 async def dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_dice()
 
-# Donke
+# ============================
+#        ВИДЕО СКАЧИВАНИЕ
+# ============================
+
+def download_video(url):
+    ydl_opts = {
+        'outtmpl': 'video.%(ext)s',
+        'format': 'mp4',
+        'quiet': True
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)
+
+async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❗ Укажи ссылку на TikTok или YouTube.")
+        return
+    url = context.args[0]
+    msg = await update.message.reply_text("⏬ Загружаю видео, подожди...")
+
+    try:
+        video_path = download_video(url)
+        with open(video_path, 'rb') as video_file:
+            await update.message.reply_video(video=video_file)
+        os.remove(video_path)
+    except Exception as e:
+        await msg.edit_text("❌ Ошибка загрузки видео.")
+        logger.error(f"Ошибка при скачивании: {e}")
+
+# ============================
+#        ПАСХАЛКА
+# ============================
+
 async def donke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(donke_phrases))
+    await update.message.reply_text(random.choice(donke_jokes))
 
-async def camdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    now = datetime.utcnow()
-    last_time = last_camdonke_time.get(user_id)
+# ============================
+#       АВТОФУНКЦИИ
+# ============================
 
-    if last_time and now - last_time < timedelta(days=1):
-        await update.message.reply_text("🥵 Вы уже сегодня кончили в Донке. Попробуйте завтра.")
-        return
+async def greet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        await update.message.reply_text(f"👋 Добро пожаловать, {member.mention_html()}", parse_mode='HTML')
 
-    amount = random.randint(1, 100)
-    donke_ratings[user_id] += amount
-    last_camdonke_time[user_id] = now
-    await update.message.reply_text(f"💦 Вы успешно залили в Donke {amount} литров спермы. Donke вами доволен. Возвращайтесь завтра.")
+# Фильтр мата
+banned_words = ["плохое", "слово", "мат"]
 
-async def topdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not donke_ratings:
-        await update.message.reply_text("Donke пока пуст. Залей спермы первым!")
-        return
-    top = sorted(donke_ratings.items(), key=lambda x: x[1], reverse=True)[:50]
-    text = "🏆 ТОП Донкеров:\n\n"
-    for i, (uid, amount) in enumerate(top, 1):
-        user = await context.bot.get_chat(uid)
-        text += f"{i}. {user.first_name}: {amount} л\n"
-    await update.message.reply_text(text)
+async def filter_bad_words(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if any(word in update.message.text.lower() for word in banned_words):
+        await update.message.delete()
 
-# Модерация
-async def moderation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.lower()
-    reply = update.message.reply_to_message
-    if not reply:
-        return
+# ============================
+#        ОБРАБОТЧИКИ
+# ============================
 
-    chat_id = update.message.chat.id
-    user_id = reply.from_user.id
+app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Привет! Я MultiBotX.")))
+app.add_handler(CommandHandler("help", lambda u, c: u.message.reply_text("/joke /fact /quote /cat /dog /meme /dice /download [url]")))
+app.add_handler(CommandHandler("warn", warn))
+app.add_handler(CommandHandler("mute", mute))
+app.add_handler(CommandHandler("unmute", unmute))
+app.add_handler(CommandHandler("ban", ban))
+app.add_handler(CommandHandler("unban", unban))
+app.add_handler(CommandHandler("joke", joke))
+app.add_handler(CommandHandler("fact", fact))
+app.add_handler(CommandHandler("quote", quote))
+app.add_handler(CommandHandler("cat", cat))
+app.add_handler(CommandHandler("dog", dog))
+app.add_handler(CommandHandler("meme", meme))
+app.add_handler(CommandHandler("dice", dice))
+app.add_handler(CommandHandler("download", download))
+app.add_handler(CommandHandler("donke", donke))
+app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet))
+app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), filter_bad_words))
 
-    if "мут" in text:
-        await context.bot.restrict_chat_member(chat_id, user_id, ChatPermissions(can_send_messages=False))
-        await update.message.reply_text("🔇 Пользователь замучен.")
-    elif "размут" in text or "анмут" in text:
-        await context.bot.restrict_chat_member(chat_id, user_id, ChatPermissions(can_send_messages=True))
-        await update.message.reply_text("🔊 Пользователь размучен.")
-    elif "бан" in text:
-        await context.bot.ban_chat_member(chat_id, user_id)
-        await update.message.reply_text("⛔ Пользователь забанен.")
-    elif "разбан" in text or "унбан" in text:
-        await context.bot.unban_chat_member(chat_id, user_id)
-        await update.message.reply_text("✅ Пользователь разбанен.")
-    elif "варн" in text:
-        await update.message.reply_text("⚠️ Пользователь получил предупреждение.")
+# ============================
+#       FLASK + POLLING
+# ============================
 
-# Загрузка видео
-async def tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        url = context.args[0]
-        if "tiktok.com" not in url:
-            await update.message.reply_text("❌ Это не ссылка на TikTok.")
-            return
-        await update.message.reply_text("⏳ Скачиваю видео...")
-        api_url = f"https://tikwm.com/api/?url={url}"
-        res = requests.get(api_url).json()
-        video_url = res.get("data", {}).get("play")
-        if video_url:
-            await update.message.reply_video(video=video_url)
-        else:
-            await update.message.reply_text("⚠️ Не удалось получить видео.")
-
-async def youtube(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        url = context.args[0]
-        if "youtube.com" not in url and "youtu.be" not in url:
-            await update.message.reply_text("❌ Это не ссылка на YouTube.")
-            return
-        await update.message.reply_text("⏳ Обрабатываю видео...")
-        api_url = f"https://ytmate.guru/api/ytvideo?url={url}"
-        res = requests.get(api_url).json()
-        link = res.get("download_url")
-        if link:
-            await update.message.reply_text(f"📥 Вот ссылка для скачивания:\n{link}")
-        else:
-            await update.message.reply_text("⚠️ Не удалось получить видео.")
-
-# /start и /help
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Я многофункциональный бот MultiBotX.\n\n🛠 Доступные команды:\n/joke, /quote, /fact, /cat, /dog, /meme, /dice\n/donke, /camdonke, /topdonke\n/tiktok <ссылка>\n/youtube <ссылка>\n\n🔧 Просто напиши в ответ на сообщение: мут, размут, бан, разбан, варн.")
-
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🆘 Команды помощи:\n/start — Запуск\n/joke — Шутка\n/cat — Котик\n/donke — Donke\n/tiktok <ссылка> — Скачать TikTok\n/youtube <ссылка> — Скачать YouTube")
-
-# Flask webhook
-@app.route("/")
+@flask_app.route("/")
 def home():
-    return "MultiBotX is running!"
+    return "MultiBotX is alive!"
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok"
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=PORT)
 
-# Запуск бота
-application = ApplicationBuilder().token(TOKEN).build()
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("help", help_cmd))
-application.add_handler(CommandHandler("joke", joke))
-application.add_handler(CommandHandler("quote", quote))
-application.add_handler(CommandHandler("fact", fact))
-application.add_handler(CommandHandler("cat", cat))
-application.add_handler(CommandHandler("dog", dog))
-application.add_handler(CommandHandler("meme", meme))
-application.add_handler(CommandHandler("dice", dice))
-application.add_handler(CommandHandler("donke", donke))
-application.add_handler(CommandHandler("camdonke", camdonke))
-application.add_handler(CommandHandler("topdonke", topdonke))
-application.add_handler(CommandHandler("tiktok", tiktok))
-application.add_handler(CommandHandler("youtube", youtube))
-
-application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, filter_bad_words))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, moderation))
+def run_polling():
+    app.run_polling()
 
 if __name__ == "__main__":
-    import threading
-
-    def run_flask():
-        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
     threading.Thread(target=run_flask).start()
-    application.run_polling()
+    run_polling()
