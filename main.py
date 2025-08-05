@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# main.py — MultiBotX (polling + Flask health) — PTB v20 compatible
+# main.py — MultiBotX (upgraded, polling + Flask health)
+# Requirements: python-telegram-bot>=21.0, Flask, requests, yt_dlp, python-dotenv
 
 import os
 import json
@@ -16,27 +17,35 @@ import requests
 import yt_dlp
 from flask import Flask
 from dotenv import load_dotenv
-from telegram import Update, ChatPermissions
+from telegram import (
+    Update,
+    ChatPermissions,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BotCommand,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-# -- load .env for local dev (Render uses Environment vars) --
+# Local .env for dev only (do not commit .env with secrets)
 load_dotenv()
 
 # ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")  # optional (we're using polling)
-SAVETUBE_KEY = os.getenv("SAVETUBE_KEY")  # optional
+HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+SAVETUBE_KEY = os.getenv("SAVETUBE_KEY", None)  # optional
 PORT = int(os.getenv("PORT", 5000))
-MAX_SEND_BYTES = 50 * 1024 * 1024  # 50 MB threshold
+MAX_SEND_BYTES = int(os.getenv("MAX_SEND_BYTES", 50 * 1024 * 1024))  # 50 MB default
+COMMANDS_SETUP = True  # set bot commands on startup
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set. Add it to Render Environment variables.")
+    raise RuntimeError("BOT_TOKEN not set. Add it to Environment variables on Render.")
 
 # ---------------- Logging ----------------
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
@@ -46,58 +55,94 @@ logger = logging.getLogger("MultiBotX")
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 DONKE_FILE = DATA_DIR / "donke.json"
+JOKES_FILE = DATA_DIR / "jokes.json"
+USAGE_FILE = DATA_DIR / "usage.json"
 
-def load_json(p: Path):
-    if p.exists():
+def load_json(path: Path):
+    if path.exists():
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            logger.exception("Failed to load JSON %s", p)
+            logger.exception("Failed to load JSON %s", path)
     return {}
 
-def save_json(p: Path, data):
+def save_json(path: Path, data):
     try:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        logger.exception("Failed to save JSON %s", p)
+        logger.exception("Failed to save JSON %s", path)
 
 donke_db = load_json(DONKE_FILE)
+joke_db = load_json(JOKES_FILE) or []
+usage_db = load_json(USAGE_FILE) or {}
 
-# ---------------- Content ----------------
-JOKES = [
-    "Почему программисты путают Хэллоуин и Рождество? OCT 31 == DEC 25.",
-    "Я бы рассказал шутку про UDP, но не уверен, что ты её получишь.",
-    "Debugging: превращение багов в фичи."
-]
-DONKE_PHRASES = [
-    "Donke пошёл в бар и забыл зачем — бар счастлив.",
-    "Donke — живой мем.",
-    "Donke сегодня в ударе."
-]
+# initial joke list if empty
+if not joke_db:
+    joke_db.extend([
+        "Почему программисты путают Хэллоуин и Рождество? OCT 31 == DEC 25.",
+        "Я бы рассказал шутку про UDP, но не уверен, что ты её получишь.",
+        "Debugging: превращение багов в фичи."
+    ])
+    save_json(JOKES_FILE, joke_db)
+
+# ---------------- Content banks (expanded) ----------------
 FACTS = [
     "У осьминога три сердца.",
-    "Кошки спят до 20 часов в день.",
+    "Кошки могут спать до 20 часов в день.",
     "Мёд не портится."
 ]
+
 QUOTES = [
-    "«Лучший способ начать — просто начать.»",
-    "«Ошибки — это доказательство попыток.»"
+    "«Лучший способ предсказать будущее — создать его.»",
+    "«Действуй — пока другие мечтают.»",
+    "«Ошибка — это шанс сделать лучше.»"
 ]
+
 BAD_WORDS = ["бляд", "хуй", "пизд", "сука", "мраз"]  # расширяй по желанию
 
 # ---------------- yt_dlp helper ----------------
-YTDL_OPTS = {
-    "format": "mp4[ext=mp4]/best",
+YTDL_COMMON = {
+    "format": "bestvideo+bestaudio/best",
     "outtmpl": "tmp_video.%(ext)s",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
+    "ignoreerrors": True,
+    "cachedir": False,
 }
 
-def download_with_yt_dlp(url: str) -> str:
-    with yt_dlp.YoutubeDL(YTDL_OPTS) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info)
+def yt_download_file(url: str, audio_only: bool = False) -> Optional[str]:
+    """
+    Downloads media via yt_dlp.
+    If audio_only True tries to extract audio (may need ffmpeg).
+    Returns path to file or None.
+    """
+    opts = dict(YTDL_COMMON)
+    if audio_only:
+        # prefer best audio and try to convert to mp3 (requires ffmpeg)
+        opts.update({
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+            "outtmpl": "tmp_audio.%(ext)s",
+        })
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            # if audio_only and postprocessor converted -> extension may be mp3
+            # try to find resulting file
+            if audio_only:
+                possible = [p for p in Path(".").glob("tmp_audio.*")]
+                if possible:
+                    return str(possible[0])
+            return filename
+    except Exception:
+        logger.exception("yt_dlp download failed for %s (audio_only=%s)", url, audio_only)
+        return None
 
 # ---------------- Utilities ----------------
 def today_iso() -> str:
@@ -109,72 +154,90 @@ def safe_remove(path: str):
     except Exception:
         pass
 
-# ---------------- Flask (health) ----------------
-flask_app = Flask(__name__)
+def inc_usage(command: str):
+    usage_db[command] = usage_db.get(command, 0) + 1
+    save_json(USAGE_FILE, usage_db)
 
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "MultiBotX is running (polling mode)."
+# ---------------- Flask health ----------------
+app = Flask(__name__)
+@app.route("/", methods=["GET"])
+def home():
+    return "MultiBotX is running."
 
-# ---------------- Handlers (Telegram) ----------------
+# ---------------- Telegram handlers ----------------
 
-# Start / Menu
+# Setup bot commands (so users see them when typing '/')
+async def set_commands_on_startup(app):
+    try:
+        commands = [
+            BotCommand("start", "Приветствие"),
+            BotCommand("menu", "Главное меню"),
+            BotCommand("joke", "Шутка"),
+            BotCommand("donke", "Шутка про Donke"),
+            BotCommand("camdonke", "Залить в Donke (раз в сутки)"),
+            BotCommand("topdonke", "Топ Donke"),
+            BotCommand("meme", "Мем"),
+            BotCommand("cat", "Фото кота"),
+            BotCommand("dog", "Фото собаки"),
+            BotCommand("dice", "Кубик"),
+            BotCommand("download", "Скачать видео/аудио по ссылке"),
+            BotCommand("searchimage", "Поиск изображения"),
+            BotCommand("trivia", "Случайный факт/вопрос"),
+            BotCommand("stats", "Статистика (админы)"),
+            BotCommand("addjoke", "Добавить шутку"),
+        ]
+        await app.bot.set_my_commands(commands)
+        logger.info("Commands set")
+    except Exception:
+        logger.exception("Failed to set commands")
+
+# Start & menu
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Я MultiBotX. /menu — главное меню.")
+    inc_usage("start")
+    await update.message.reply_text("👋 Привет! Я MultiBotX. Напиши /menu чтобы увидеть функции.")
 
 async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("menu")
     text = (
-        "📋 Меню MultiBotX:\n\n"
+        "📋 *Меню MultiBotX*\n\n"
         "Развлечения:\n"
-        "/joke, /fact, /quote, /cat, /dog, /meme, /dice\n\n"
+        "/joke /fact /quote /cat /dog /meme /dice\n\n"
         "Donke:\n"
-        "/donke — шутка\n"
-        "/camdonke — залить в Donke (раз в сутки)\n"
-        "/topdonke — топ 50\n\n"
-        "Видео: пришли ссылку на YouTube/TikTok — бот попробует скачать.\n\n"
-        "Модерация: ответь на сообщение и напиши: варн / мут / размут / бан / анбан"
+        "/donke /camdonke /topdonke\n\n"
+        "Видео:\n"
+        "/download <url> или просто отправь ссылку — появится выбор: Видео / Аудио\n\n"
+        "Прочее:\n"
+        "/searchimage <запрос> — найти картинку\n"
+        "/trivia — факт/вопрос\n"
+        "/stats — статистика (админы)\n"
     )
     await update.message.reply_text(text)
 
 # Entertainment
 async def joke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(JOKES))
+    inc_usage("joke")
+    await update.message.reply_text(random.choice(joke_db))
+
+async def addjoke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("addjoke")
+    text = " ".join(context.args) if context.args else (update.message.text or "")
+    # expected: /addjoke some joke here
+    if not text:
+        await update.message.reply_text("Использование: /addjoke ТЕКСТ_ШУТКИ")
+        return
+    # remove command part if exists
+    if text.lower().startswith("/addjoke"):
+        text = text[len("/addjoke"):].strip()
+    joke_db.append(text)
+    save_json(JOKES_FILE, joke_db)
+    await update.message.reply_text("Добавил шутку — спасибо!")
 
 async def donke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(DONKE_PHRASES))
+    inc_usage("donke")
+    await update.message.reply_text(random.choice(["Donke легенда.", "Donke в деле.", "Donke forever."]))
 
-async def fact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(FACTS))
-
-async def quote_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(random.choice(QUOTES))
-
-async def cat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        r = requests.get("https://api.thecatapi.com/v1/images/search", timeout=10).json()
-        await update.message.reply_photo(r[0]["url"])
-    except Exception:
-        await update.message.reply_text("Не удалось получить фото котика.")
-
-async def dog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        r = requests.get("https://dog.ceo/api/breeds/image/random", timeout=10).json()
-        await update.message.reply_photo(r["message"])
-    except Exception:
-        await update.message.reply_text("Не удалось получить фото собаки.")
-
-async def meme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        r = requests.get("https://meme-api.com/gimme", timeout=10).json()
-        await update.message.reply_photo(r["url"], caption=r.get("title", "Мем"))
-    except Exception:
-        await update.message.reply_text("Не удалось получить мем.")
-
-async def dice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_dice()
-
-# Donke (camdonke / topdonke)
 async def camdonke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("camdonke")
     user = update.effective_user
     uid = str(user.id)
     entry = donke_db.get(uid, {"name": user.full_name, "total": 0, "last": None})
@@ -190,27 +253,97 @@ async def camdonke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"💦 Вы успешно залили в Donke {amount} литров! Приходите завтра.")
 
 async def topdonke_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("topdonke")
     if not donke_db:
         await update.message.reply_text("Пока никто не заливал.")
         return
     sorted_list = sorted(donke_db.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)[:50]
     lines = ["🏆 Топ Donke:"]
     for i, (uid, e) in enumerate(sorted_list, 1):
-        name = e.get("name", f"@{uid}")
-        total = e.get("total", 0)
-        lines.append(f"{i}. {name} — {total} л")
+        lines.append(f"{i}. {e.get('name','?')} — {e.get('total',0)} л")
     await update.message.reply_text("\n".join(lines))
 
-# Moderation (reply text: "варн", "мут", "бан", "размут", "анбан")
+async def fact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("fact")
+    await update.message.reply_text(random.choice(FACTS))
+
+async def quote_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("quote")
+    await update.message.reply_text(random.choice(QUOTES))
+
+async def cat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("cat")
+    try:
+        r = requests.get("https://api.thecatapi.com/v1/images/search", timeout=10).json()
+        await update.message.reply_photo(r[0]["url"])
+    except Exception:
+        await update.message.reply_text("Не удалось получить фото котика.")
+
+async def dog_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("dog")
+    try:
+        r = requests.get("https://dog.ceo/api/breeds/image/random", timeout=10).json()
+        await update.message.reply_photo(r["message"])
+    except Exception:
+        await update.message.reply_text("Не удалось получить фото собаки.")
+
+async def meme_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("meme")
+    try:
+        r = requests.get("https://meme-api.com/gimme", timeout=10).json()
+        await update.message.reply_photo(r["url"], caption=r.get("title", "Мем"))
+    except Exception:
+        await update.message.reply_text("Не удалось получить мем.")
+
+async def dice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("dice")
+    await update.message.reply_dice()
+
+# trivia
+TRIVIA = [
+    "Сколько сердец у осьминога? — Три.",
+    "Какой язык программирования назван в честь змеи? — Python.",
+]
+async def trivia_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("trivia")
+    await update.message.reply_text(random.choice(TRIVIA))
+
+# search image (simple unsplash source)
+async def searchimage_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("searchimage")
+    query = " ".join(context.args) if context.args else None
+    if not query:
+        await update.message.reply_text("Использование: /searchimage <запрос>")
+        return
+    try:
+        # unsplash source allows simple random images without API key
+        url = f"https://source.unsplash.com/800x600/?{requests.utils.requote_uri(query)}"
+        await update.message.reply_photo(url)
+    except Exception:
+        await update.message.reply_text("Не удалось найти изображение.")
+
+# stats (admin)
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # only chat owner / specific id allowed — for simplicity, allow user id match ENV ADMIN_ID or chat creator
+    ADMIN_ID = os.getenv("ADMIN_ID")
+    if ADMIN_ID and str(user.id) != str(ADMIN_ID):
+        await update.message.reply_text("Недостаточно прав.")
+        return
+    inc_usage("stats")
+    lines = ["📊 Статистика использования:"]
+    for k, v in sorted(usage_db.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"{k}: {v}")
+    await update.message.reply_text("\n".join(lines) if len(lines) > 1 else "Пока нет статистики.")
+
+# moderation (reply-based commands without /)
 async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.reply_to_message:
         return
-    cmd = msg.text.strip().lower()
+    cmd = (msg.text or "").strip().lower()
     target = msg.reply_to_message.from_user
     chat = msg.chat
-
-    # проверим права модератора
     try:
         member = await chat.get_member(msg.from_user.id)
         if not (member.status in ("administrator", "creator") or member.can_restrict_members):
@@ -253,9 +386,8 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             logger.exception("Unban failed")
 
-# Welcome / profanity / anti-flood
-LAST_MSG = {}  # {(chat_id,user_id): [timestamps]}
-
+# welcome/profanity/anti-flood
+LAST_MSG = {}
 async def welcome_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.new_chat_members:
         for m in update.message.new_chat_members:
@@ -274,11 +406,12 @@ async def profanity_and_flood_handler(update: Update, context: ContextTypes.DEFA
             except Exception:
                 pass
             return
+    # flood simple
     key = (msg.chat.id, msg.from_user.id)
-    now_ts = datetime.utcnow().timestamp()
+    now = datetime.utcnow().timestamp()
     arr = LAST_MSG.get(key, [])
-    arr = [t for t in arr if now_ts - t < 10]
-    arr.append(now_ts)
+    arr = [t for t in arr if now - t < 10]
+    arr.append(now)
     LAST_MSG[key] = arr
     if len(arr) > 6:
         try:
@@ -288,8 +421,13 @@ async def profanity_and_flood_handler(update: Update, context: ContextTypes.DEFA
         except Exception:
             pass
 
-# Download handler (command or plain URL)
-async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Download flow:
+# - User can run /download <url> OR just send a message with URL
+# - Bot replies with inline buttons: "Видео", "Аудио"
+# - On callback query, bot downloads (yt_dlp) and sends file (or link if too big)
+async def make_download_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("download_prompt")
+    # extract first URL
     text = None
     if context.args:
         text = context.args[0]
@@ -298,13 +436,33 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m:
             text = m.group(0)
     if not text:
+        await update.message.reply_text("Пришлите ссылку на видео (YouTube/TikTok и т.д.) или используйте /download <url>")
+        return
+    url = text.strip()
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📹 Видео", callback_data=f"dl|video|{url}"),
+        InlineKeyboardButton("🎧 Аудио", callback_data=f"dl|audio|{url}")
+    ]])
+    await update.message.reply_text("Выберите формат для скачивания:", reply_markup=keyboard)
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # acknowledge
+    data = query.data or ""
+    if not data.startswith("dl|"):
+        return
+    try:
+        _, kind, url = data.split("|", 2)
+    except ValueError:
+        await query.edit_message_text("Неправильные данные.")
         return
 
-    url = text.strip()
-    status_msg = await update.message.reply_text("⏬ Пытаюсь скачать видео (это займет время)...")
+    # inform user
+    msg = await query.edit_message_text("⏬ Начинаю скачивание... Это может занять время.")
+    # attempt SaveTube for TikTok audio/video if key present and kind=video
+    file_path = None
     try:
-        # If TikTok and SaveTube key available — try SaveTube API first
-        if "tiktok.com" in url and SAVETUBE_KEY:
+        if "tiktok.com" in url and SAVETUBE_KEY and kind == "video":
             try:
                 headers = {"X-RapidAPI-Key": SAVETUBE_KEY}
                 api = "https://save-tube-video-download.p.rapidapi.com/download"
@@ -313,77 +471,50 @@ async def download_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if isinstance(j, dict) and j.get("links"):
                     vid_url = j["links"][0].get("url")
                     if vid_url:
-                        await update.message.reply_video(vid_url)
-                        await status_msg.delete()
+                        # send direct url if smaller than limit (we don't know size) — try to send as video
+                        await context.bot.send_video(chat_id=query.message.chat_id, video=vid_url)
+                        await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
                         return
             except Exception:
-                logger.exception("SaveTube failed, fallback to yt_dlp")
-        # fallback to yt_dlp for any supported URL
-        fname = download_with_yt_dlp(url)
-        size = os.path.getsize(fname)
-        if size > MAX_SEND_BYTES:
-            await update.message.reply_text("Видео слишком большое для отправки (больше 50 MB).")
-            safe_remove(fname)
-            await status_msg.delete()
+                logger.exception("SaveTube attempt failed, falling back to yt_dlp")
+
+        # Use yt_dlp
+        audio_only = (kind == "audio")
+        file_path = yt_download_file(url, audio_only=audio_only)
+        if not file_path:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Не удалось скачать видео/аудио.")
             return
-        with open(fname, "rb") as f:
-            await update.message.reply_video(f)
-        safe_remove(fname)
-        await status_msg.delete()
-    except Exception as e:
-        logger.exception("Download error: %s", e)
+
+        size = os.path.getsize(file_path)
+        if size > MAX_SEND_BYTES:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Файл слишком большой для отправки. Попробуйте другую ссылку или скачайте локально.")
+            safe_remove(file_path)
+            return
+
+        # send file
+        with open(file_path, "rb") as fp:
+            if audio_only:
+                # try to send as audio or document fallback
+                try:
+                    await context.bot.send_audio(chat_id=query.message.chat_id, audio=fp)
+                except Exception:
+                    fp.seek(0)
+                    await context.bot.send_document(chat_id=query.message.chat_id, document=fp)
+            else:
+                fp.seek(0)
+                await context.bot.send_video(chat_id=query.message.chat_id, video=fp)
+        safe_remove(file_path)
+    except Exception:
+        logger.exception("Error in callback download")
         try:
-            await status_msg.edit_text("❌ Не удалось скачать видео. Попробуйте другую ссылку.")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Произошла ошибка при скачивании.")
         except Exception:
             pass
 
-# Error handler
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Handler error: %s", context.error)
-    try:
-        tb = "".join(traceback.format_exception(None, context.error, context.error.__traceback__))
-        logger.error(tb)
-    except Exception:
-        pass
-
-# ---------------- Build application ----------------
-def build_application():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # commands
-    application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("menu", menu_handler))
-    application.add_handler(CommandHandler("joke", joke_handler))
-    application.add_handler(CommandHandler("donke", donke_handler))
-    application.add_handler(CommandHandler("camdonke", camdonke_handler))
-    application.add_handler(CommandHandler("topdonke", topdonke_handler))
-    application.add_handler(CommandHandler("fact", fact_handler))
-    application.add_handler(CommandHandler("quote", quote_handler))
-    application.add_handler(CommandHandler("cat", cat_handler))
-    application.add_handler(CommandHandler("dog", dog_handler))
-    application.add_handler(CommandHandler("meme", meme_handler))
-    application.add_handler(CommandHandler("dice", dice_handler))
-    application.add_handler(CommandHandler("download", download_handler))
-
-    # message handlers
-    application.add_handler(MessageHandler(filters.Regex(r"https?://"), download_handler))
-    application.add_handler(MessageHandler(filters.TEXT & filters.REPLY, moderation_handler))
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, profanity_and_flood_handler))
-
-    application.add_error_handler(error_handler)
-    return application
-
-application = build_application()
-
-# ---------------- Run (polling + Flask health) ----------------
-def run():
-    # Flask for health (listening port for Render)
-    thread = Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT))
-    thread.start()
-
-    # run polling for PTB
-    application.run_polling()
-
-if __name__ == "__main__":
-    run()
+# Generic message handler: if contains URL -> show buttons
+async def url_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    m = re.search(r"https?://\S+", text)
+    if m:
+        await make_download_buttons(update, context)
+    els
