@@ -1,509 +1,527 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-MultiBotX — полный файл main.py
-Функции: красивые меню, регистрация команд, скачивание видео/аудио (yt_dlp), Donke, модерация,
-анти-мат (включается командой /antimat), статистика, напоминания, мемы, котики/собаки, добавление шуток и т.д.
-"""
+# ================== MultiBotX - Усовершенствованная версия ==================
+# Разработано для python-telegram-bot v21+ и Flask
+# Автор: ChatGPT + Archangel_MichaeI
+# ============================================================================
 
 import os
-import json
-import logging
-import random
 import re
-import shutil
-import tempfile
-import traceback
+import random
+import logging
+import json
+import threading
 from datetime import datetime, timedelta
-from pathlib import Path
-from threading import Thread
-from typing import Optional
+from functools import wraps
 
-import requests
-import yt_dlp
-from flask import Flask
+from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import (
-    Update,
-    ChatPermissions,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    BotCommand,
-    BotCommandScopeDefault,
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeAllGroupChats,
+    Update, InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand
 )
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
+import yt_dlp
+import requests
 
-# Load .env locally for development (do not commit .env)
+# ================= Загрузка переменных окружения =================
 load_dotenv()
 
-# ---------------- Config ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = os.getenv("ADMIN_ID")  # optional admin id
-SAVETUBE_KEY = os.getenv("SAVETUBE_KEY")  # optional RapidAPI key for SaveTube
-MAX_SEND_BYTES = int(os.getenv("MAX_SEND_BYTES", 50 * 1024 * 1024))  # default 50MB
-COMMANDS_SETUP = os.getenv("COMMANDS_SETUP", "1") not in ("0", "false", "False")
-PORT = int(os.getenv("PORT", 5000))
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+MAX_SEND_BYTES = int(os.getenv("MAX_SEND_BYTES", str(1024 * 1024 * 1024)))  # до 1 ГБ
+COMMANDS_SETUP = os.getenv("COMMANDS_SETUP", "true").lower() in ("1", "true", "yes")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add it to environment variables.")
+    raise ValueError("❌ BOT_TOKEN не задан в переменных окружения!")
 
-# ---------------- Logging ----------------
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
-logger = logging.getLogger("MultiBotX")
+# ================= Логирование =================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# ---------------- Data storage ----------------
-ROOT = Path(".")
-DATA_DIR = ROOT / "data"
+# ================= Flask =================
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def index():
+    return "MultiBotX is running!"
+
+# ================= Глобальные переменные =================
+antimat_enabled = False
+warns = {}
+donke_jokes = [
+    "Donke пошёл в магазин, а вернулся без самооценки.",
+    "Donke смеётся только над шутками Donke.",
+    "Donke придумал новый закон физики: закон лени."
+]
+bad_words = ["дурак", "идиот", "тупой", "осёл", "козёл", "мудак", "пидор", "лох", "мразь", "гандон"]
+
+# Список команд для меню Telegram
+BOT_COMMANDS = [
+    BotCommand("start", "Запуск бота"),
+    BotCommand("help", "Показать помощь"),
+    BotCommand("menu", "Красивое меню с кнопками"),
+    BotCommand("joke", "Случайная шутка"),
+    BotCommand("fact", "Интересный факт"),
+    BotCommand("quote", "Цитата дня"),
+    BotCommand("cat", "Фото кота"),
+    BotCommand("dog", "Фото собаки"),
+    BotCommand("meme", "Случайный мем"),
+    BotCommand("dice", "Бросить кубик"),
+    BotCommand("donke", "Шутка про Donke"),
+    BotCommand("camdonke", "Добавить свою шутку Donke"),
+    BotCommand("topdonke", "Топ шуток Donke"),
+    BotCommand("antimat", "Включить/выключить анти-мат"),
+]# ================= Часть 2: Развлечения, мемы, факты, хранилище =================
+
+from pathlib import Path
+import json
+import asyncio
+
+# Папка для данных
+DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-DONKE_FILE = DATA_DIR / "donke.json"
+
 JOKES_FILE = DATA_DIR / "jokes.json"
+DONKE_FILE = DATA_DIR / "donke.json"
 USAGE_FILE = DATA_DIR / "usage.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
-ERROR_LOG = DATA_DIR / "errors.log"
 
-def load_json(p: Path):
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            logger.exception("Failed to load JSON %s", p)
-    return {}
-
-def save_json(p: Path, data):
+# Загрузка/сохранение JSON утилиты
+def load_json_safe(path: Path, default=None):
     try:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        logger.exception("Failed to save JSON %s", p)
-
-donke_db = load_json(DONKE_FILE)
-joke_data = load_json(JOKES_FILE)
-joke_db = joke_data.get("jokes", []) if isinstance(joke_data, dict) else []
-usage_db = load_json(USAGE_FILE)
-settings_db = load_json(SETTINGS_FILE)
-
-# bootstrap jokes
-if not joke_db:
-    joke_db = [
-        "Почему программисты путают Хэллоуин и Рождество? OCT 31 == DEC 25.",
-        "Я бы рассказал шутку про UDP, но не уверен, что ты её получишь.",
-        "Debugging: превращение багов в фичи."
-    ]
-    save_json(JOKES_FILE, {"jokes": joke_db})
-
-def inc_usage(key: str):
-    usage_db[key] = usage_db.get(key, 0) + 1
-    save_json(USAGE_FILE, usage_db)
-
-def log_error(e: Exception):
-    logger.exception(e)
-    try:
-        with open(ERROR_LOG, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.utcnow().isoformat()} - {traceback.format_exc()}\n")
-    except Exception:
-        pass
-
-# ---------------- Antimat ----------------
-ANTIMAT_WORDS = [
-    # core expanded list (short sample; you can extend)
-    "бляд", "блядь", "хуй", "хер", "пизд", "пиздец", "сука", "мраз", "ебал", "ебать",
-    "соси", "гандон", "мудак", "тварь", "долбоёб", "кретин", "идиот"
-]
-if "antimat" not in settings_db:
-    settings_db["antimat"] = {}  # chat_id -> bool
-    save_json(SETTINGS_FILE, settings_db)
-
-# ---------------- yt_dlp helpers ----------------
-YTDL_COMMON = {
-    "format": "bestvideo+bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "ignoreerrors": True,
-    "cachedir": False,
-}
-
-YTDL_VIDEO_OPTS = dict(YTDL_COMMON)
-YTDL_VIDEO_OPTS["outtmpl"] = "%(id)s.%(ext)s"
-
-YTDL_AUDIO_OPTS = dict(YTDL_COMMON)
-YTDL_AUDIO_OPTS.update({
-    "format": "bestaudio/best",
-    "outtmpl": "%(id)s.%(ext)s",
-    "postprocessors": [{
-        "key": "FFmpegExtractAudio",
-        "preferredcodec": "mp3",
-        "preferredquality": "192",
-    }],
-})
-
-def yt_download(url: str, audio_only: bool = False) -> Optional[str]:
-    tmpdir = tempfile.mkdtemp(prefix="mbx_")
-    opts = YTDL_AUDIO_OPTS.copy() if audio_only else YTDL_VIDEO_OPTS.copy()
-    opts["outtmpl"] = str(Path(tmpdir) / opts.get("outtmpl", "%(id)s.%(ext)s"))
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if info is None:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-                return None
-            # find any file in tmpdir
-            files = list(Path(tmpdir).glob("*"))
-            if not files:
-                shutil.rmtree(tmpdir, ignore_errors=True)
-                return None
-            return str(files[0])
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        log_error(e)
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        return None
+        logger.exception("load_json_safe error: %s", e)
+    return default if default is not None else {}
 
-def cleanup_path(path: str):
+def save_json_safe(path: Path, data):
     try:
-        base = Path(path).parent
-        if base.exists():
-            shutil.rmtree(base, ignore_errors=True)
-    except Exception:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.exception("save_json_safe error: %s", e)
 
-# ---------------- Flask health ----------------
-flask_app = Flask(__name__)
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "MultiBotX is running."
+# Инициализация баз
+jokes_store = load_json_safe(JOKES_FILE, {"jokes": [
+    "Почему программисты путают Хэллоуин и Рождество? OCT 31 == DEC 25.",
+    "Я бы рассказал шутку про UDP, но она может не дойти.",
+    "Debugging — превращение багов в фичи."
+]})
+donke_store = load_json_safe(DONKE_FILE, {})
+usage_store = load_json_safe(USAGE_FILE, {})
+settings_store = load_json_safe(SETTINGS_FILE, {"antimat": {}})
 
-# ---------------- Bot commands list ----------------
-BOT_COMMANDS_DETAILED = [
-    ("start", "Приветствие"),
-    ("menu", "Главное меню"),
-    ("joke", "Шутка"),
-    ("addjoke", "Добавить шутку"),
-    ("donke", "Donke шутка"),
-    ("camdonke", "Залить в Donke (1x/сутки)"),
-    ("topdonke", "Топ Donke"),
-    ("meme", "Мем"),
-    ("cat", "Фото кота"),
-    ("dog", "Фото собаки"),
-    ("dice", "Кубик"),
-    ("download", "Скачать видео/аудио по ссылке"),
-    ("searchimage", "Поиск изображения"),
-    ("trivia", "Случайный факт"),
-    ("stats", "Статистика (админ)"),
-    ("antimat", "Вкл/выкл анти-мат (модераторы)"),
-    ("motivate", "Мотивация"),
-    ("compliment", "Комплимент"),
-    ("remindme", "Напоминание: /remindme <минуты> <текст>"),
-]
+# Помощник для статистики использования
+def inc_usage(key: str):
+    usage_store[key] = usage_store.get(key, 0) + 1
+    save_json_safe(USAGE_FILE, usage_store)
 
-# ---------------- Helpers ----------------
-def today_iso():
-    return datetime.utcnow().date().isoformat()
-
-def is_chat_admin(user_id: int, chat) -> bool:
-    # allow ADMIN_ID, chat admin/creator
-    if ADMIN_ID and str(user_id) == str(ADMIN_ID):
-        return True
-    try:
-        member = chat.get_member(user_id)
-        if member.status in ("administrator", "creator"):
-            return True
-    except Exception:
-        pass
-    return False
-
-# ---------------- Menu UI ----------------
-def main_menu_markup():
-    kb = [
-        [InlineKeyboardButton("🎭 Развлечения", callback_data="menu:entertain")],
-        [InlineKeyboardButton("🎥 Медиа", callback_data="menu:media")],
-        [InlineKeyboardButton("😈 Donke", callback_data="menu:donke")],
-        [InlineKeyboardButton("🛡 Модерация", callback_data="menu:moderation")],
-        [InlineKeyboardButton("🔎 Полезное", callback_data="menu:useful")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
-# ---------------- Handlers ----------------
-
-# Start / Menu
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    inc_usage("start")
-    text = (
-        "👋 *MultiBotX* — многофункциональный бот.\n\n"
-        "Нажми кнопку ниже, чтобы открыть удобное меню (или используй `/menu`)."
-    )
-    try:
-        await update.message.reply_markdown(text, reply_markup=main_menu_markup())
-    except Exception:
-        await update.message.reply_text("Привет! Напиши /menu чтобы открыть меню.")
-
-async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    inc_usage("menu")
-    try:
-        await update.message.reply_text("📋 Главное меню:", reply_markup=main_menu_markup())
-    except Exception:
-        await update.message.reply_text("Меню: /joke /donke /download /cat /dog /meme /stats")
-
-# Menu callbacks
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data or ""
-    if data == "menu:entertain":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("😂 /joke", callback_data="ent:joke"),
-             InlineKeyboardButton("💬 /trivia", callback_data="ent:trivia")],
-            [InlineKeyboardButton("💡 /motivate", callback_data="ent:motivate"),
-             InlineKeyboardButton("➕ /addjoke", callback_data="ent:addjoke")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:back")]
-        ])
-        await q.edit_message_text("🎭 Развлечения:", reply_markup=kb)
-    elif data == "menu:media":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📹 Скачать по ссылке", callback_data="media:download")],
-            [InlineKeyboardButton("🐱 /cat", callback_data="media:cat"),
-             InlineKeyboardButton("🐶 /dog", callback_data="media:dog")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:back")]
-        ])
-        await q.edit_message_text("🎥 Медиа:", reply_markup=kb)
-    elif data == "menu:donke":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("😈 /donke", callback_data="donke:donke"),
-             InlineKeyboardButton("💦 /camdonke", callback_data="donke:camdonke")],
-            [InlineKeyboardButton("🏆 /topdonke", callback_data="donke:topdonke"),
-             InlineKeyboardButton("⬅️ Назад", callback_data="menu:back")]
-        ])
-        await q.edit_message_text("Donke:", reply_markup=kb)
-    elif data == "menu:moderation":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⚠️ Подсказки модерации", callback_data="mod:hint")],
-            [InlineKeyboardButton("🧯 /antimat", callback_data="mod:antimat")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu:back")]
-        ])
-        await q.edit_message_text("Модерация:", reply_markup=kb)
-    elif data == "menu:useful":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔎 /searchimage", callback_data="useful:searchimage"),
-             InlineKeyboardButton("⏰ /remindme", callback_data="useful:remindme")],
-            [InlineKeyboardButton("📊 /stats", callback_data="useful:stats"),
-             InlineKeyboardButton("⬅️ Назад", callback_data="menu:back")]
-        ])
-        await q.edit_message_text("Полезное:", reply_markup=kb)
-    elif data == "menu:back":
-        await q.edit_message_text("📋 Главное меню:", reply_markup=main_menu_markup())
-    # sub callbacks (simple)
-    elif data.startswith("ent:"):
-        action = data.split(":", 1)[1]
-        if action == "joke":
-            await q.edit_message_text(random.choice(joke_db))
-        elif action == "trivia":
-            await q.edit_message_text("Факт: " + random.choice(["У осьминога 3 сердца.", "Мёд не портится."]))
-        elif action == "motivate":
-            await q.edit_message_text(random.choice(["Действуй!", "Маленькие шаги — большие изменения."]))
-        elif action == "addjoke":
-            await q.edit_message_text("Чтобы добавить шутку — используй команду /addjoke ТЕКСТ")
-    elif data.startswith("media:"):
-        action = data.split(":", 1)[1]
-        if action == "download":
-            await q.edit_message_text("Отправь ссылку в чат, и я предложу скачать видео или только звук.")
-        elif action == "cat":
-            await q.edit_message_text("Используй /cat чтобы получить фото кота.")
-    elif data.startswith("donke:"):
-        action = data.split(":", 1)[1]
-        if action == "donke":
-            await q.edit_message_text(random.choice(["Donke — легенда.", "Donke forever."]))
-        elif action == "camdonke":
-            await q.edit_message_text("Вызовите /camdonke чтобы залить в Donke.")
-        elif action == "topdonke":
-            await q.edit_message_text("Вызовите /topdonke чтобы увидеть рейтинг.")
-    else:
-        await q.edit_message_text("Опция пока не реализована.")
-
-# ---------------- Entertainment ----------------
-async def joke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----------------- Развлекательные команды -----------------
+async def cmd_joke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет случайную шутку"""
     inc_usage("joke")
-    await update.message.reply_text(random.choice(joke_db))
+    joke = random.choice(jokes_store.get("jokes", []))
+    await update.message.reply_text(joke)
 
-async def addjoke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_addjoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет шутку в базу: /addjoke Текст"""
     inc_usage("addjoke")
-    text = " ".join(context.args) if context.args else None
+    text = " ".join(context.args) if context.args else ""
     if not text:
         await update.message.reply_text("Использование: /addjoke ТЕКСТ_ШУТКИ")
         return
-    joke_db.append(text)
-    save_json(JOKES_FILE, {"jokes": joke_db})
-    await update.message.reply_text("Спасибо — шутка добавлена!")
+    jokes_store.setdefault("jokes", []).append(text)
+    save_json_safe(JOKES_FILE, jokes_store)
+    await update.message.reply_text("Спасибо! Шутка добавлена.")
 
-async def trivia_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    inc_usage("trivia")
-    await update.message.reply_text(random.choice(["Факт:", "Интересно:"]) + " " + random.choice(["У осьминога 3 сердца.", "Кошки спят много."]))
+async def cmd_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("fact")
+    facts = [
+        "У осьминога три сердца.",
+        "Пчёлы видят ультрафиолет.",
+        "Мёд не портится."
+    ]
+    await update.message.reply_text(random.choice(facts))
 
-async def motivate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    inc_usage("motivate")
-    await update.message.reply_text(random.choice(["Действуй прямо сейчас.", "Ты способен на большее."]))
+async def cmd_quote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("quote")
+    quotes = [
+        "«Лучший способ начать — начать.»",
+        "«Ошибки — доказательство попыток.»",
+        "«Делай сегодня то, что другие не хотят, завтра будешь жить как другие не могут.»"
+    ]
+    await update.message.reply_text(random.choice(quotes))
 
-async def compliment_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    inc_usage("compliment")
-    await update.message.reply_text(random.choice(["Ты молодец!", "У тебя хорошее чувство юмора."]))
-
-# ---------------- Images / memes ----------------
-async def cat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----------------- Картинки: котики, собаки, мемы -----------------
+async def cmd_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("cat")
     try:
         r = requests.get("https://api.thecatapi.com/v1/images/search", timeout=10).json()
-        await update.message.reply_photo(r[0]["url"])
+        if isinstance(r, list) and r:
+            await update.message.reply_photo(r[0]["url"])
+        else:
+            await update.message.reply_text("Не удалось получить котика. Попробуйте снова.")
     except Exception as e:
-        log_error(e)
-        await update.message.reply_text("Не удалось получить котика.")
+        logger.exception("cat error: %s", e)
+        await update.message.reply_text("Ошибка при получении котика.")
 
-async def dog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_dog(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("dog")
     try:
         r = requests.get("https://dog.ceo/api/breeds/image/random", timeout=10).json()
         await update.message.reply_photo(r["message"])
     except Exception as e:
-        log_error(e)
-        await update.message.reply_text("Не удалось получить собаку.")
+        logger.exception("dog error: %s", e)
+        await update.message.reply_text("Ошибка при получении собаки.")
 
-async def meme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("meme")
     try:
         r = requests.get("https://meme-api.com/gimme", timeout=10).json()
-        await update.message.reply_photo(r["url"], caption=r.get("title", "Мем"))
+        url = r.get("url")
+        title = r.get("title", "Мем")
+        if url:
+            await update.message.reply_photo(url, caption=title)
+        else:
+            await update.message.reply_text("Не удалось получить мем.")
     except Exception as e:
-        log_error(e)
-        await update.message.reply_text("Не удалось получить мем.")
+        logger.exception("meme error: %s", e)
+        await update.message.reply_text("Ошибка при получении мема.")
 
-async def dice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_dice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("dice")
     await update.message.reply_dice()
 
-# ---------------- Donke ----------------
-async def donke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ----------------- Donke: шутки и система camdonke -----------------
+async def cmd_donke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("donke")
-    await update.message.reply_text(random.choice(["Donke — легенда.", "Donke forever."]))
+    await update.message.reply_text(random.choice(donke_jokes))
 
-async def camdonke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_camdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь раз в день может 'залить' в Donke случайное количество литров"""
     inc_usage("camdonke")
     user = update.effective_user
     uid = str(user.id)
-    entry = donke_db.get(uid, {"name": user.full_name, "total": 0, "last": None})
-    if entry.get("last") == today_iso():
-        await update.message.reply_text("Сегодня уже заливали — заходите завтра.")
+    entry = donke_store.get(uid, {"name": user.full_name, "total": 0, "last": None})
+    if entry.get("last") == datetime.utcnow().date().isoformat():
+        await update.message.reply_text("Сегодня вы уже заливали в Donke. Приходите завтра.")
         return
     amount = random.randint(1, 100)
     entry["total"] = entry.get("total", 0) + amount
-    entry["last"] = today_iso()
+    entry["last"] = datetime.utcnow().date().isoformat()
     entry["name"] = user.full_name
-    donke_db[uid] = entry
-    save_json(DONKE_FILE, donke_db)
-    await update.message.reply_text(f"💦 Вы успешно залили в Donke {amount} литров! Приходите завтра.")
+    donke_store[uid] = entry
+    save_json_safe(DONKE_FILE, donke_store)
+    await update.message.reply_text(f"💦 Вы успешно залили в Donke {amount} л. Приходите завтра!")
 
-async def topdonke_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_topdonke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inc_usage("topdonke")
-    if not donke_db:
+    if not donke_store:
         await update.message.reply_text("Пока никто не заливал.")
         return
-    sorted_list = sorted(donke_db.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)[:50]
-    lines = ["🏆 Топ Donke:"]
-    for i, (uid, e) in enumerate(sorted_list, 1):
-        lines.append(f"{i}. {e.get('name', '?')} — {e.get('total', 0)} л")
+    lst = sorted(donke_store.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)[:50]
+    lines = [f"{i+1}. {v[1].get('name','?')} — {v[1].get('total',0)} л" for i,(k,v) in enumerate(lst)]
     await update.message.reply_text("\n".join(lines))
 
-# ---------------- Moderation (reply-based) ----------------
-async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.reply_to_message:
+# ----------------- Helper: register core command handlers (to call later) -----------------
+def register_entertainment_handlers(app: Application):
+    app.add_handler(CommandHandler("joke", cmd_joke))
+    app.add_handler(CommandHandler("addjoke", cmd_addjoke))
+    app.add_handler(CommandHandler("fact", cmd_fact))
+    app.add_handler(CommandHandler("quote", cmd_quote))
+    app.add_handler(CommandHandler("cat", cmd_cat))
+    app.add_handler(CommandHandler("dog", cmd_dog))
+    app.add_handler(CommandHandler("meme", cmd_meme))
+    app.add_handler(CommandHandler("dice", cmd_dice))
+    app.add_handler(CommandHandler("donke", cmd_donke))
+    app.add_handler(CommandHandler("camdonke", cmd_camdonke))
+    app.add_handler(CommandHandler("topdonke", cmd_topdonke))# ================= Часть 3: Модерация, анти-мат, скачивание видео =================
+
+# ----- Модерация (работает без /, по ключевым словам) -----
+MOD_WORDS = {
+    "варн": "warn",
+    "мут": "mute",
+    "размут": "unmute",
+    "анмут": "unmute",
+    "бан": "ban",
+    "анбан": "unban",
+    "разбан": "unban"
+}
+
+async def handle_moderation_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Реакция на слова-модерацию в ответ на сообщение"""
+    if not update.message.reply_to_message:
         return
-    cmd = (msg.text or "").strip().lower()
-    target = msg.reply_to_message.from_user
-    chat = msg.chat
+    text = update.message.text.lower().strip()
+    action = MOD_WORDS.get(text)
+    if not action:
+        return
+    chat_id = update.effective_chat.id
+    target_user = update.message.reply_to_message.from_user
     try:
-        member = await chat.get_member(msg.from_user.id)
-        if not (member.status in ("administrator", "creator") or member.can_restrict_members):
-            await msg.reply_text("У вас нет прав модератора.")
-            return
-    except Exception:
-        pass
-    warns = context.bot_data.setdefault("warns", {})
-    if "варн" in cmd:
-        warns[target.id] = warns.get(target.id, 0) + 1
-        await msg.reply_text(f"⚠️ {target.full_name} получил предупреждение ({warns[target.id]}).")
-        if warns[target.id] >= 3:
-            await chat.ban_member(target.id)
-            await msg.reply_text(f"🚫 {target.full_name} забанен (3 предупреждения).")
-            warns[target.id] = 0
-    elif "мут" in cmd:
-        until = datetime.utcnow() + timedelta(minutes=10)
-        await chat.restrict_member(target.id, ChatPermissions(can_send_messages=False), until_date=until)
-        await msg.reply_text(f"🔇 {target.full_name} замучен на 10 минут.")
-    elif cmd in ("размут", "анмут"):
-        await chat.restrict_member(target.id, ChatPermissions(can_send_messages=True))
-        await msg.reply_text(f"🔊 {target.full_name} размучен.")
-    elif "бан" in cmd:
-        await chat.ban_member(target.id)
-        await msg.reply_text(f"🚫 {target.full_name} забанен.")
-    elif cmd in ("разбан", "унбан", "анбан"):
-        await chat.unban_member(target.id)
-        await msg.reply_text(f"✅ {target.full_name} разбанен.")
+        if action == "warn":
+            await update.message.reply_text(f"⚠️ {target_user.full_name} получил предупреждение!")
+        elif action == "mute":
+            until = datetime.utcnow() + timedelta(hours=1)
+            await context.bot.restrict_chat_member(chat_id, target_user.id, ChatPermissions(can_send_messages=False), until_date=until)
+            await update.message.reply_text(f"🔇 {target_user.full_name} замьючен на 1 час!")
+        elif action == "unmute":
+            await context.bot.restrict_chat_member(chat_id, target_user.id, ChatPermissions(can_send_messages=True))
+            await update.message.reply_text(f"🔊 {target_user.full_name} размьючен!")
+        elif action == "ban":
+            await context.bot.ban_chat_member(chat_id, target_user.id)
+            await update.message.reply_text(f"⛔ {target_user.full_name} забанен!")
+        elif action == "unban":
+            await context.bot.unban_chat_member(chat_id, target_user.id)
+            await update.message.reply_text(f"♻️ {target_user.full_name} разбанен!")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
 
-# ---------------- Welcome + profanity + anti-flood ----------------
-LAST_MSG = {}  # {(chat_id,user_id): [timestamps]}
+# ----- Анти-мат -----
+BAD_WORDS = {"лох", "дурак", "идиот", "тупой", "дебил", "сука", "блядь", "хуй", "пидор", "шлюха", "гандон"}
 
-async def welcome_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.new_chat_members:
-        for u in update.message.new_chat_members:
-            await update.message.reply_text(f"👋 Добро пожаловать, {u.full_name}!")
+async def cmd_antimat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Включает/выключает фильтр мата для чата"""
+    chat_id = str(update.effective_chat.id)
+    settings_store.setdefault("antimat", {})
+    settings_store["antimat"][chat_id] = not settings_store["antimat"].get(chat_id, False)
+    save_json_safe(SETTINGS_FILE, settings_store)
+    state = "включён" if settings_store["antimat"][chat_id] else "выключен"
+    await update.message.reply_text(f"🛡 Анти-мат теперь {state} в этом чате.")
 
-async def profanity_and_flood(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.text:
+async def check_antimat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка на мат"""
+    chat_id = str(update.effective_chat.id)
+    if not settings_store.get("antimat", {}).get(chat_id, False):
         return
-    text = msg.text.lower()
-    chat_id = str(msg.chat.id)
-    antimat_on = settings_db.get("antimat", {}).get(chat_id, False)
-    if antimat_on:
-        for bad in ANTIMAT_WORDS:
-            if bad in text:
-                try:
-                    await msg.delete()
-                    await msg.reply_text("🚫 Нецензурная лексика запрещена в этом чате.")
-                except Exception:
-                    pass
-                return
-    # anti-flood
-    key = (msg.chat.id, msg.from_user.id)
-    now_ts = datetime.utcnow().timestamp()
-    arr = LAST_MSG.get(key, [])
-    arr = [t for t in arr if now_ts - t < 10]
-    arr.append(now_ts)
-    LAST_MSG[key] = arr
-    if len(arr) > 6:
+    if any(bad in update.message.text.lower() for bad in BAD_WORDS):
         try:
-            await msg.chat.restrict_member(msg.from_user.id, ChatPermissions(can_send_messages=False),
-                                           until_date=datetime.utcnow() + timedelta(minutes=1))
-            await msg.reply_text("🤐 Антифлуд: замучен на 1 минуту.")
-        except Exception:
+            await update.message.delete()
+            await update.message.reply_text("🛑 Сообщение удалено: запрещённая лексика.")
+        except:
             pass
 
-# ---------------- Antimat toggle command ----------------
-async def antimat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # only allow chat admin or ADMIN_ID
-    user = update.effective_user
-    chat = update.effective_chat
+# ----- Скачивание видео/аудио -----
+async def download_media(url: str, audio_only=False):
+    """Скачивание медиа (видео или только аудио) через yt_dlp"""
+    ydl_opts = {
+        "outtmpl": "downloads/%(title)s.%(ext)s",
+        "format": "bestaudio/best" if audio_only else "best",
+        "quiet": True,
+        "noplaylist": True,
+    }
+    Path("downloads").mkdir(exist_ok=True)
+    loop = asyncio.get_event_loop()
     try:
-        member = await chat.get_member(user.id)
-        if member.status not in ("administrator", "creator") and str(user.id) != str(ADMIN_ID):
-     
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=True))
+            file_path = Path(ydl.prepare_filename(info))
+        return file_path
+    except Exception as e:
+        logger.exception("download_media error: %s", e)
+        return None
+
+async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """При получении ссылки — предлагаем выбрать формат"""
+    url = update.message.text.strip()
+    if not any(host in url for host in ["youtube.com", "youtu.be", "tiktok.com"]):
+        return
+    keyboard = [
+        [InlineKeyboardButton("📹 Видео", callback_data=f"video|{url}")],
+        [InlineKeyboardButton("🎵 Аудио", callback_data=f"audio|{url}")]
+    ]
+    await update.message.reply_text("Что хотите скачать?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def process_download_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    choice, url = query.data.split("|", 1)
+    audio_only = choice == "audio"
+    msg = await query.edit_message_text("⏳ Скачивание, подождите...")
+    file_path = await download_media(url, audio_only=audio_only)
+    if not file_path:
+        await msg.edit_text("❌ Не удалось скачать файл.")
+        return
+    try:
+        with open(file_path, "rb") as f:
+            if audio_only:
+                await query.message.reply_audio(f)
+            else:
+                await query.message.reply_video(f)
+        os.remove(file_path)
+        await msg.delete()
+    except Exception as e:
+        await msg.edit_text(f"Ошибка отправки файла: {e}")
+
+# ----------------- Регистрация модерации/анти-мата/скачивания -----------------
+def register_moderation_handlers(app: Application):
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_moderation_keywords))
+    app.add_handler(CommandHandler("antimat", cmd_antimat))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_antimat))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
+    app.add_handler(CallbackQueryHandler(process_download_choice))# ================= Часть 4: Меню, регистрация команд, запуск =================
+
+import asyncio
+from telegram import BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+
+# ---------- UI: start / menu ----------
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    inc_usage("start")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎭 Развлечения", callback_data="menu:entertain")],
+        [InlineKeyboardButton("🎥 Медиа (скачать)", callback_data="menu:media")],
+        [InlineKeyboardButton("😈 Donke", callback_data="menu:donke")],
+        [InlineKeyboardButton("🛡 Модерация", callback_data="menu:moderation")],
+        [InlineKeyboardButton("🔎 Полезное", callback_data="menu:useful")],
+    ])
+    text = "👋 *MultiBotX* — привет! Нажми на кнопку ниже, чтобы открыть меню или введи /menu."
+    try:
+        await update.message.reply_markdown(text, reply_markup=kb)
+    except Exception:
+        await update.message.reply_text("Привет! Введи /menu для показа меню.")
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Я MultiBotX — бот с развлечениями, модерацией и скачиванием медиа.\n"
+        "Введи /menu или нажми кнопку в меню."
+    )
+
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # повторяем стартовое меню (воспользуемся той же разметкой)
+    await start_cmd(update, context)
+
+# ---------- Commands registration (robust, async) ----------
+BOT_COMMANDS_LIST = [(c.command, c.description) for c in BOT_COMMANDS]
+
+async def _set_commands_once(bot):
+    commands = [BotCommand(name, desc) for name, desc in BOT_COMMANDS_LIST]
+    scopes = [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()]
+    last_exc = None
+    for attempt in range(1, 4):
+        try:
+            for scope in scopes:
+                await bot.set_my_commands(commands, scope=scope)
+            logger.info("Commands set (attempt %d)", attempt)
+            return True
+        except Exception as e:
+            last_exc = e
+            logger.warning("set_my_commands attempt %d failed: %s", attempt, e)
+            await asyncio.sleep(2 * attempt)
+    logger.exception("Failed to set commands after attempts: %s", last_exc)
+    return False
+
+def register_commands_sync(app_obj):
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_set_commands_once(app_obj.bot))
+        loop.close()
+    except Exception:
+        logger.exception("register_commands_sync failed")
+
+# Manual handlers to set/check commands from chat
+async def setcommands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    # allow only admin or chat admins
+    allowed = False
+    if ADMIN_ID and str(user.id) == str(ADMIN_ID):
+        allowed = True
+    try:
+        member = await update.effective_chat.get_member(user.id)
+        if member.status in ("administrator", "creator"):
+            allowed = True
+    except Exception:
+        if update.effective_chat.type == "private":
+            allowed = True
+    if not allowed:
+        await update.message.reply_text("Только админы могут обновлять команды.")
+        return
+    await update.message.reply_text("Обновляю команды... проверь логи.")
+    try:
+        ok = await _set_commands_once(context.bot)
+        await update.message.reply_text("Команды установлены." if ok else "Не удалось установить команды, см. логи.")
+    except Exception as e:
+        log_error(e)
+        await update.message.reply_text("Ошибка при установке команд.")
+
+async def checkcommands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        cmds = await context.bot.get_my_commands()
+        if not cmds:
+            await update.message.reply_text("Команды не установлены.")
+            return
+        lines = [f"/{c.command} — {c.description}" for c in cmds]
+        await update.message.reply_text("Установленные команды:\n" + "\n".join(lines))
+    except Exception as e:
+        log_error(e)
+        await update.message.reply_text("Ошибка при получении команд.")
+
+# ---------- Register all handlers into application ----------
+def build_application():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # basic commands / menu
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+
+    # entertainment / data
+    register_entertainment_handlers(app)
+
+    # moderation / antimat / download
+    register_moderation_handlers(app)
+
+    # manual commands for commands management
+    app.add_handler(CommandHandler("setcommands", setcommands_cmd))
+    app.add_handler(CommandHandler("checkcommands", checkcommands_cmd))
+
+    # other utilities
+    app.add_handler(CommandHandler("remindme", remindme_cmd))
+    app.add_handler(CommandHandler("searchimage", searchimage_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    app.add_handler(CommandHandler("avatar", avatar_cmd))
+
+    # ensure error handler registered if exists
+    try:
+        app.add_error_handler(error_handler)
+    except Exception:
+        pass
+
+    return app
+
+# ---------- Reminder worker starter ----------
+def start_reminder_worker(app):
+    thr = threading.Thread(target=lambda: reminder_worker(app), daemon=True)
+    thr.start()
+
+# ---------- Run: Flask (health) + Bot (polling) ----------
+def run():
+    application = build_application()
+
+    # register commands on start (if enabled)
+    if COMMANDS_SETUP:
+        logger.info("COMMANDS_SETUP enabled — registering commands...")
+        register_commands_sync(application)
+
+    # start Flask health server on separate thread
+    flask_thr = threading.Thread(target=lambda: flask_app.run(host="0.0.0.0", port=PORT), daemon=True)
+    flask_thr.start()
+    logger.info("Flask health server started on port %s", PORT)
+
+    # start reminder worker
+    try:
+        start_reminder_worker(application)
+    except Exception:
+        logger.exception("Failed to start reminder worker")
+
+    # run bot polling
+    logger.info("Starting bot polling...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    run()
