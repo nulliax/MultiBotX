@@ -19,7 +19,8 @@ import re
 
 Логирование
 
-logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 Flask-приложение
 
