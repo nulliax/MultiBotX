@@ -1,5 +1,3 @@
-main.py (часть 1/6) — Идеальный, проверенный код с поддержкой Flask, модерации, развлечений, скачивания видео и автофункций
-
 import os import logging from flask import Flask, request from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler) from telegram.constants import ChatAction from datetime import datetime, timedelta import random import aiohttp import re
 
 Логирование
