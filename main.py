@@ -1,4 +1,21 @@
-import os import logging from flask import Flask, request from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler) from telegram.constants import ChatAction from datetime import datetime, timedelta import random import aiohttp import re
+import os
+import logging
+from flask import Flask, request
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+    CallbackContext,
+    CallbackQueryHandler
+)
+from telegram.constants import ChatAction
+from datetime import datetime, timedelta
+import random
+import aiohttp
+import re
 
 Логирование
 
