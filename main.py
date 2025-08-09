@@ -515,14 +515,22 @@ def register_handlers():
 def main():
     register_handlers()
     # async set commands
-    application.create_task(setup_bot_commands())
+    async def main():
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    # start Flask health endpoint in a background thread
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))), daemon=True)
-    flask_thread.start()
+    # Регистрируем хендлеры
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    # ... другие хендлеры
 
-    logger.info("Starting bot (polling mode)...")
-    application.run_polling(allowed_updates=None)
+    # Устанавливаем команды при старте
+    async def post_init(app: Application):
+        await setup_bot_commands(app)
+
+    application.post_init = post_init
+
+    await application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
