@@ -512,12 +512,12 @@ def register_handlers():
     # auto filters (anti-mat / anti-flood) — apply to all text that's not a command
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_filters))
 
-def main():
+def start_bot():
     register_handlers()
     # async set commands
     async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-
+        application = Application.builder().token(BOT_TOKEN).build()
+520:     # здесь остальной код
     # Регистрируем хендлеры
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
